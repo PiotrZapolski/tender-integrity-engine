@@ -24,7 +24,7 @@ Zwróć wyłącznie JSON: {"budget": liczba lub null, "offers": [{"offer_no": li
 "price_basis": "total" | "unit" | "other"}]}.
 Zasady: jedna pozycja na ofertę; przy konsorcjum bidder_name to lider (pierwszy wymieniony);
 price to cena brutto oferty jako liczba z kropką dziesiętną; price_basis "unit" gdy cena dotyczy
-jednostki (godzina, km, sztuka); nie dodawaj zamawiającego jako oferenta; nie zgaduj NIP."""  # noqa: E501
+jednostki (godzina, km, sztuka); nie dodawaj zamawiającego jako oferenta; nie zgaduj NIP."""
 
 # Matched against normalize_name(line): the offers table starts at the first such line.
 _MARKERS = ("wykonawc", "oferent", "nazwa", "otwarto")
@@ -40,7 +40,7 @@ def _to_decimal(value: Any) -> Decimal | None:
     if value is None or isinstance(value, Decimal):
         return value
     if isinstance(value, bool):
-        raise ValueError("boolean is not an amount")
+        raise ValueError("boolean is not an amount")  # noqa: TRY004 - pydantic needs ValueError
     if isinstance(value, int):
         return Decimal(value)
     if isinstance(value, float):
@@ -57,7 +57,7 @@ def _to_decimal(value: Any) -> Decimal | None:
                 raise ValueError(f"not an amount: {value!r}") from None
             out = amount
     else:
-        raise ValueError(f"not an amount: {value!r}")
+        raise ValueError(f"not an amount: {value!r}")  # noqa: TRY004 - pydantic needs ValueError
     if not out.is_finite():
         raise ValueError(f"not a finite amount: {value!r}")
     return out
