@@ -675,8 +675,7 @@ def _variants(x: float) -> set[str]:
 
 def _is_id_key(key: str) -> bool:
     k = key.lower()
-    return (k in _ID_KEYS or k.endswith("_id") or k.endswith("_ids") or k.endswith("_hash")
-            or k.endswith("_url") or k.endswith("_key"))
+    return k in _ID_KEYS or k.endswith(("_id", "_ids", "_hash", "_url", "_key"))
 
 
 def allowed_numbers(evidence: Evidence, *texts: str) -> set[str]:
