@@ -26,3 +26,12 @@ def normalize_name(name: str) -> str:
 def looks_like_company(name: str) -> bool:
     n = normalize_name(name)
     return bool(set(n.split()) & _COMPANY_TOKENS) or "przedsiebiorstwo panstwowe" in n
+
+
+PLACEHOLDER_PREFIX = "NIP "
+
+
+def placeholder_name(nip: str) -> str:
+    """Nazwa wykonawcy znanego tylko z NIP (oferta bez nazwy), do czasu wzbogacenia z białej
+    listy, która ją podmienia."""
+    return f"{PLACEHOLDER_PREFIX}{nip}"

@@ -6,7 +6,15 @@ Oferty (`bids`) bez `bidder_id` dopasowujemy tak:
   a decyzję podejmuje Jev (pytanie typu `choice`). Gdy wybrany kandydat ma prawdopodobieństwo
   >= `threshold`, wiążemy ofertę z nim; inaczej tworzymy nowego wykonawcę bez NIP.
 
-Każda oferta to osobna transakcja (decider sam zatwierdza wiersz w `ai_calls`).
+Oferta z NIP, ale bez nazwy (parser deterministyczny), dla nieznanego NIP tworzy wykonawcę
+o nazwie zastępczej `NIP <nip>` (`placeholder_name`); biała lista podmienia ją na nazwę z MF.
+
+Każda oferta to osobna transakcja (decider sam zatwierdza wiersz w `ai_calls`). Błąd jednej
+oferty (np. odrzucony stan w Jev) nie zatrzymuje pozostałych: oferta jest logowana, pomijana
+i dopisywana do zbioru `skip`, więc w tym samym przebiegu nie wraca; kolejny przebieg (następne
+zadanie `identity`) spróbuje jej znowu. Przerywają tylko błędy systemowe: `BudgetExceeded`,
+utrata połączenia z bazą i wyczerpane ponowienia HTTP (`HttpGiveUp`), a także sytuacja, gdy
+w paczce co najmniej dwóch ofert nie udała się żadna.
 """
 
 from __future__ import annotations
@@ -17,8 +25,10 @@ from typing import Any, Protocol
 
 import psycopg
 
+from tie.ai.providers import BudgetExceeded
 from tie.bzp.store import upsert_bidder
-from tie.identity.names import normalize_name
+from tie.http import HttpGiveUp
+from tie.identity.names import normalize_name, placeholder_name
 
 log = logging.getLogger(__name__)
 
@@ -98,28 +108,43 @@ def _nip_digits(raw: str | None) -> str | None:
 
 
 def _resolve_by_nip(conn: psycopg.Connection, raw_name: str, nip: str) -> tuple[int, bool]:
-    """Zwraca (bidder_id, czy wykonawca już istniał)."""
+    """Zwraca (bidder_id, czy wykonawca już istniał).
+
+    Bez nazwy w ofercie nowy wykonawca dostaje nazwę zastępczą `NIP <nip>`.
+    """
     row = conn.execute("select id from bidders where nip = %s", (nip,)).fetchone()
     if row is not None:
         return row["id"], True
-    return upsert_bidder(conn, name=raw_name, nip=nip, city=None, province=None), False
+    name = raw_name.strip() or placeholder_name(nip)
+    return upsert_bidder(conn, name=name, nip=nip, city=None, province=None), False
+
+
+def _systemic(exc: BaseException) -> bool:
+    """Błąd, który dotyczy wszystkich ofert (budżet, baza, sieć), a nie jednej oferty."""
+    fatal = (BudgetExceeded, psycopg.OperationalError, psycopg.InterfaceError, HttpGiveUp)
+    return isinstance(exc, fatal) or isinstance(exc.__cause__, HttpGiveUp)
 
 
 def resolve_unmatched_bids(
-    conn: psycopg.Connection, decider: Decider, *, threshold: float = 0.85, limit: int = 200
+    conn: psycopg.Connection, decider: Decider, *, threshold: float = 0.85, limit: int = 200,
+    skip: set[int] | None = None,
 ) -> int:
     """Uzupełnij `bids.bidder_id` dla ofert bez wykonawcy.
 
-    Zwraca liczbę ofert dopasowanych do istniejących wykonawców.
+    Zwraca liczbę ofert dopasowanych do istniejących wykonawców. Oferty z `skip` są pomijane;
+    id ofert, których nie udało się przetworzyć, są do `skip` dopisywane (ten sam zbiór
+    przekazuj w kolejnych wywołaniach jednego przebiegu).
     """
+    if skip is None:
+        skip = set()
     bids = conn.execute(
         "select id, bidder_name_raw, bidder_nip_raw from bids"
-        " where bidder_id is null order by id limit %s",
-        (limit,),
+        " where bidder_id is null and not (id = any(%s::bigint[])) order by id limit %s",
+        (list(skip), limit),
     ).fetchall()
     conn.commit()
 
-    matched = 0
+    matched = failed = 0
     # Ta sama nazwa w kilku ofertach w jednym przebiegu: jedna decyzja AI.
     seen: dict[str, tuple[int, float | None, bool]] = {}
     for bid in bids:
@@ -148,10 +173,19 @@ def resolve_unmatched_bids(
                 (bidder_id, confidence, bid["id"]),
             )
             conn.commit()
-        except Exception:
+        except Exception as exc:
             conn.rollback()
-            raise
+            if _systemic(exc):
+                raise
+            failed += 1
+            skip.add(bid["id"])
+            log.exception("identity: bid %s skipped", bid["id"])
+            continue
         if existed:
             matched += 1
-    log.info("identity: %d bids processed, %d matched to existing bidders", len(bids), matched)
+    log.info("identity: %d bids processed, %d matched to existing bidders, %d skipped",
+             len(bids), matched, failed)
+    if len(bids) >= 2 and failed == len(bids):
+        # Every bid failing points at a systemic problem (API contract, key), not at data.
+        raise RuntimeError(f"identity: all {len(bids)} bids failed")
     return matched

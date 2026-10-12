@@ -203,7 +203,13 @@ def upsert_notice(conn: psycopg.Connection, notice: ResultNotice, raw_sha256: st
 
     Zwraca `{"ocds_id": str, "lots": int, "needs_opening": bool}`. Gdy `needs_opening`,
     po zatwierdzeniu transakcji dodaje zadanie `ezam_docs` z kluczem `ocds_id`.
+
+    Ogłoszenie bez `tenderId` (puste lub brak) rzuca `ValueError` przed jakimkolwiek zapisem:
+    inaczej wszystkie takie ogłoszenia nadpisywałyby jeden wiersz `procedures('')`. Handler
+    `bzp_day` loguje taki rekord i go pomija.
     """
+    if not (notice.ocds_id or "").strip():
+        raise ValueError(f"notice {notice.notice_number}: empty tenderId, not stored")
     try:
         buyer_id = _upsert_buyer(conn, notice)
         _upsert_procedure(conn, notice, buyer_id, raw_sha256)

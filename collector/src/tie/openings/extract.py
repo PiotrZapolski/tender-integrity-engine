@@ -14,6 +14,10 @@ MIN_TEXT_CHARS = 200
 PDFTOTEXT_TIMEOUT = 60
 PDFTOPPM_TIMEOUT = 300
 TESSERACT_TIMEOUT = 120
+# OCR renders at most this many pages (`pdftoppm -l`). Opening documents have 1-3 pages; a
+# misclassified long scan would otherwise fill /tmp with 300 dpi PNGs and block the single
+# worker for hours. Text past the cap is dropped, so such a document fails the cross-check.
+OCR_MAX_PAGES = 20
 
 
 class UnsupportedDocument(Exception):
@@ -75,7 +79,8 @@ def _ocr(data: bytes) -> str:
         pdf_path = tmp_dir / "file.pdf"
         pdf_path.write_bytes(data)
         subprocess.run(
-            ["pdftoppm", "-r", "300", "-png", str(pdf_path), str(tmp_dir / "page")],
+            ["pdftoppm", "-r", "300", "-l", str(OCR_MAX_PAGES), "-png", str(pdf_path),
+             str(tmp_dir / "page")],
             check=True,
             capture_output=True,
             timeout=PDFTOPPM_TIMEOUT,
