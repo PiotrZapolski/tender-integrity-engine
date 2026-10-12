@@ -142,6 +142,6 @@ def test_403_on_other_host_returned_without_retry():
 def test_handlers_configure_ezamowienia_waf_retry():
     from tie.handlers import RATES, RETRY_STATUSES_BY_HOST
 
-    assert RATES["ezamowienia.gov.pl"] == 2.0
+    assert RATES["ezamowienia.gov.pl"] == 1.0
     assert RATES["ezamawiajacy.pl"] == 5.0
     assert RETRY_STATUSES_BY_HOST == {"ezamowienia.gov.pl": {403}}
