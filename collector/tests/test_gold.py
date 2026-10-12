@@ -3,6 +3,7 @@ import os
 import re
 from decimal import Decimal as D
 from importlib import resources
+from itertools import pairwise
 
 import httpx
 import pytest
@@ -148,7 +149,7 @@ def test_chunk_text_long_text_overlaps_at_line_boundaries():
     assert all(len(c) <= 2000 for c in chunks)
     joined = "".join(chunks)
     assert all(line in joined for line in lines)
-    for a, b in zip(chunks, chunks[1:]):
+    for a, b in pairwise(chunks):
         # the next chunk starts with a full line that also ends the previous chunk
         first = b.split("\n", 1)[0]
         assert first in lines and first in a
@@ -214,7 +215,7 @@ def test_extract_case_single_chunk(fixtures):
     assert case.decision == "RLU-7/2023" and case.year == 2023
     t = case.tenders[0]
     assert t.rigged is True and t.year == 2019 and t.date == "2019-07-26"
-    assert [b.price for b in t.bids] == [D("88944.0"), D("98100.00"), D("103550"),
+    assert [b.price for b in t.bids] == [D("88944.0"), D("98100.00"), D(103550),
                                         D("114450.00"), D("119900.0")]
     assert [b.won for b in t.bids] == [False, True, False, False, False]
     assert case.pattern == ["bid_suppression", "cover_bids"]
@@ -257,7 +258,7 @@ def test_extract_case_merges_chunks():
     assert gorzkow.rigged is True and gorzkow.date == "2019-07-26" and gorzkow.year == 2019
     by_bidder = {b.bidder: b for b in gorzkow.bids}
     assert len(gorzkow.bids) == 3
-    assert by_bidder["TACHO-SYSTEM Marek Pilip"].price == D("88944")
+    assert by_bidder["TACHO-SYSTEM Marek Pilip"].price == D(88944)
     assert by_bidder["Usługi Transportowe Skiba Marcin"].won is True
     names = [c.name for c in case.colluders]
     assert names == ["Usługi Transportowe Skiba Marcin", "TACHO-SYSTEM Marek Pilip",
@@ -281,6 +282,13 @@ def test_extract_case_skips_invalid_chunk():
     case = extract_case(fake, RLU, "a" * 300 + "\n" + "b" * 300, max_chars=400, overlap=50)
     assert len(case.tenders) == 1
     assert case.source["chunks"] == 2 and case.source["failed_chunks"] == [2]
+
+
+def test_extract_case_skips_chunk_with_provider_error():
+    fake = FakeProvider(RuntimeError("deepseek returned no valid JSON content"), gorzkow_payload())
+    case = extract_case(fake, RLU, "a" * 300 + "\n" + "b" * 300, max_chars=400, overlap=50)
+    assert len(fake.calls) == 2 and len(case.tenders) == 1
+    assert case.source["failed_chunks"] == [1]
 
 
 def test_extract_case_all_chunks_invalid_raises():
