@@ -40,6 +40,49 @@ Every AI call writes a row to the `ai_calls` table. The daily limit is `AI_DAILY
 (default 5.0); once it is reached further calls fail with `BudgetExceeded` until the next day.
 Spend per day:
 `select date_trunc('day', created_at) d, sum(cost_usd) from ai_calls group by 1 order by 1 desc;`
+
+## Recipes
+
+Run SQL from `/var/www/tie/infra` with:
+`docker compose -f docker-compose.yml -f docker-compose.prod.yml exec db psql -U tie tie -c "<sql>"`.
+
+Check AI spend today (UTC day, the same window the budget uses), per provider and task:
+
+```sql
+select provider, task, count(*) calls, sum(cost_usd) usd, count(*) filter (where not ok) failed
+from ai_calls where created_at >= date_trunc('day', now())
+group by 1, 2 order by usd desc;
+```
+
+Requeue failed jobs of one kind after fixing the cause (for example a missing
+`DEEPSEEK_API_KEY` makes every `opening_parse` job fail, a missing `JEV_API_KEY` every
+`identity` job). Add the key to `infra/.env`, redeploy, then:
+
+```sql
+update jobs set status = 'queued', attempts = 0, run_after = now(), locked_at = null,
+  last_error = null
+where status = 'failed' and kind = 'opening_parse';
+```
+
+Running `tie backfill` again does not help: jobs are deduplicated on `(kind, key)` whatever
+their status, so failed jobs must be requeued with the statement above.
+
+Re-parse documents rejected by the cross-check (`status = 'mismatch'`), for example after a
+parser fix. The raw file is already in the raw store, so nothing is downloaded again; each
+document gets a new `opening_parse` job with a fresh key:
+
+```sql
+insert into jobs(kind, key, payload)
+select 'opening_parse', source_doc_id || '@reparse-' || to_char(now(), 'YYYYMMDDHH24MI'),
+       jsonb_build_object('document_id', id)
+from documents where status = 'mismatch' and doc_type = 'opening'
+on conflict (kind, key) do nothing;
+```
+
+The same works for `needs_review` documents. Bids that fail during identity matching are
+logged (`identity: bid <id> skipped`) and retried by the next `identity` job; they never
+block the other bids.
+
 ## Backup
 
 - Postgres is backed up automatically by the host's `/opt/backup` (auto-discovered).

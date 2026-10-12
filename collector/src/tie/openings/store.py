@@ -198,12 +198,21 @@ def _write_bids(conn: psycopg.Connection, document_id: int, lot: _Lot, rows: lis
 
 def _store(conn: psycopg.Connection, document_id: int,
            checked: list[tuple[_Lot, list[OfferRow], CheckResult]], method: str) -> None:
+    """Write the offers of every checked lot. The offers of a checked lot come from exactly
+    one document, the last one that passed the cross-check: rows of these lots written
+    earlier (by this or by another opening document of the procedure, e.g. a correction or a
+    separate summary) that the current result does not have are deleted, so a lot never ends
+    up with duplicate bids or two winners."""
     ids: list[int] = []
+    lot_ids: list[int] = []
     for lot, rows, result in checked:
         ids.extend(_write_bids(conn, document_id, lot, rows, result.scale, method))
-    # Rows from an earlier run of this document that the current result no longer has.
-    conn.execute("delete from bids where document_id = %s and not (id = any(%s::bigint[]))",
-                 (document_id, ids))
+        lot_ids.append(lot.id)
+    conn.execute(
+        "delete from bids where (lot_id = any(%s::bigint[]) or document_id = %s)"
+        " and not (id = any(%s::bigint[]))",
+        (lot_ids, document_id, ids),
+    )
 
 
 def _duplicate_keys(rows: list[OfferRow]) -> bool:

@@ -1,4 +1,7 @@
 import json
+from dataclasses import replace
+
+import pytest
 
 from tie.bzp.parser import parse_result_notice
 from tie.bzp.store import upsert_bidder, upsert_notice
@@ -6,6 +9,15 @@ from tie.bzp.store import upsert_bidder, upsert_notice
 
 def notice(fixtures, name):
     return parse_result_notice(json.loads((fixtures / "bzp" / name).read_text("utf-8")))
+
+
+@pytest.mark.parametrize("ocds_id", ["", "  ", None])
+def test_empty_tender_id_is_not_stored(db, fixtures, ocds_id):
+    n = replace(notice(fixtures, "result_spytkowo.json"), ocds_id=ocds_id)
+    with pytest.raises(ValueError, match="tenderId"):
+        upsert_notice(db, n, "sha")
+    for table in ("procedures", "lots", "buyers", "bidders", "jobs"):
+        assert db.execute(f"select count(*) c from {table}").fetchone()["c"] == 0
 
 
 def test_upsert_multilot_idempotent(db, fixtures):

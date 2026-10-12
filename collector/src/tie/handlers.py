@@ -136,18 +136,31 @@ def _identity(ctx: Context, payload: dict) -> None:
     if ctx.decider is None:
         raise RuntimeError("JEV_API_KEY not set")
     deadline = time.monotonic() + IDENTITY_TIME_LIMIT_S
-    left = _count(ctx.conn, "select count(*) n from bids where bidder_id is null")
+    # Bids that failed in this run (logged by resolve_unmatched_bids) are not retried until
+    # the next identity job, so one bad bid cannot stall the rest.
+    skip: set[int] = set()
+
+    def unmatched() -> int:
+        n = ctx.conn.execute(
+            "select count(*) n from bids where bidder_id is null"
+            " and not (id = any(%s::bigint[]))", (list(skip),)).fetchone()["n"]
+        ctx.conn.commit()
+        return n
+
+    left = unmatched()
     while left:
         if time.monotonic() >= deadline:
             key = f"more@{datetime.now(UTC).isoformat()}"
             enqueue(ctx.conn, "identity", key)
             log.info("identity: %d bids left, continuation %s queued", left, key)
             return
-        resolve_unmatched_bids(ctx.conn, ctx.decider)
-        before, left = left, _count(ctx.conn,
-                                    "select count(*) n from bids where bidder_id is null")
+        resolve_unmatched_bids(ctx.conn, ctx.decider, skip=skip)
+        before, left = left, unmatched()
         if left >= before:
             raise RuntimeError(f"identity: no progress, {left} bids still unmatched")
+    if skip:
+        log.warning("identity: %d bids skipped after errors, first ids: %s", len(skip),
+                    sorted(skip)[:20])
 
 
 def _whitelist(ctx: Context, payload: dict) -> None:

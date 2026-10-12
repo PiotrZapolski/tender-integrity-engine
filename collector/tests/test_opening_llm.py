@@ -275,3 +275,29 @@ def test_budget_exceeded_propagates(db, fixtures, tmp_path):
     else:
         raise AssertionError("BudgetExceeded was swallowed")
     assert doc_row(db, doc_id)["status"] == "downloaded"
+
+
+def test_second_opening_document_replaces_bids_of_lot(db, fixtures, tmp_path):
+    # A procedure publishes "Informacja z otwarcia ofert" and later a correction (or a
+    # separate "Zbiorcze zestawienie ofert"); both pass the cross-check for the same lot.
+    rs, doc_a = setup_doc(db, fixtures, tmp_path, "result_spytkowo.json",
+                          "spytkowo_unit_prices.pdf", SPY_OCDS)
+    assert process_opening_document(db, rs, FakeProvider(
+        {"budget": None, "offers": spy_offers()}), doc_a) == "parsed"
+    sha = rs.put((fixtures / "openings" / "spytkowo_unit_prices.pdf").read_bytes(),
+                 source="ezam")
+    doc_b = db.execute(
+        "insert into documents(procedure_id, source, source_doc_id, file_name, doc_type,"
+        " raw_sha256, status) values (%s,'ezamowienia',%s,'korekta.pdf','opening',%s,"
+        "'downloaded') returning id", (SPY_OCDS, SPY_OCDS + "_10", sha)).fetchone()["id"]
+    db.commit()
+    offers_b = spy_offers()
+    offers_b[0]["bidder_name"] = "MONSTER GROUP Sp. z o.o."  # spelled differently
+    offers_b[2]["offer_no"] = 33  # numbered differently
+    assert process_opening_document(db, rs, FakeProvider(
+        {"budget": None, "offers": offers_b}), doc_b) == "parsed"
+    bids = db.execute("select * from bids order by price").fetchall()
+    assert len(bids) == 8
+    assert sum(b["is_winner"] for b in bids) == 1
+    assert all(b["document_id"] == doc_b for b in bids)
+    assert {b["bidder_name_raw"] for b in bids} == {o["bidder_name"] for o in offers_b}

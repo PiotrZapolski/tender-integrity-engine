@@ -15,6 +15,7 @@ from datetime import date
 import psycopg
 
 from tie.http import PoliteClient
+from tie.identity.names import PLACEHOLDER_PREFIX, normalize_name
 
 log = logging.getLogger(__name__)
 
@@ -66,12 +67,30 @@ def _pending(conn: psycopg.Connection, limit: int) -> list[dict]:
 
 
 def _apply_subject(conn: psycopg.Connection, bidder_id: int, subject: dict) -> None:
+    """Zapisz dane z MF. Nazwę (i `name_norm`) bierzemy z MF tylko, gdy obecna jest pusta albo
+    zastępcza (`NIP <nip>`); prawdziwej nazwy z BZP lub dokumentu nigdy nie nadpisujemy."""
     krs = subject.get("krs") or None
     address = subject.get("workingAddress") or subject.get("residenceAddress") or None
+    wl_name = (subject.get("name") or "").strip() or None
+    # In UPDATE every SET expression sees the old row, so both columns test the old name.
+    fill = ("(%(name)s::text is not null"
+            " and (btrim(name) = '' or name = %(prefix)s::text || coalesce(nip, '')))")
     conn.execute(
-        "update bidders set regon = coalesce(%s, regon), krs = %s, is_jdg = %s,"
-        " address = coalesce(%s, address), wl_checked_at = now() where id = %s",
-        (subject.get("regon") or None, krs, krs is None, address, bidder_id),
+        "update bidders set regon = coalesce(%(regon)s, regon), krs = %(krs)s,"
+        " is_jdg = %(is_jdg)s, address = coalesce(%(address)s, address),"
+        f" name = case when {fill} then %(name)s::text else name end,"
+        f" name_norm = case when {fill} then %(name_norm)s::text else name_norm end,"
+        " wl_checked_at = now() where id = %(id)s",
+        {
+            "regon": subject.get("regon") or None,
+            "krs": krs,
+            "is_jdg": krs is None,
+            "address": address,
+            "name": wl_name,
+            "name_norm": normalize_name(wl_name or ""),
+            "prefix": PLACEHOLDER_PREFIX,
+            "id": bidder_id,
+        },
     )
     for number in subject.get("accountNumbers") or []:
         if not re.sub(r"\D", "", number or ""):
