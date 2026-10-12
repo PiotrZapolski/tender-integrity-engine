@@ -92,3 +92,33 @@ map `{"areas":[{"teryt":"3007","key":"A"}]}`; graph as `graph`.
 | title | text | Polish text of the OECD item |
 | status | text | `A`, `C` or `N` |
 | how | text | how we check it, or why we cannot |
+
+## api.validation (latest calibration run, page "Sprawdziliśmy się")
+One row `kind = 'summary'` with the run's `metrics` and `params` (case columns null), then one
+row `kind = 'case'` per gold case (order by `position`). Written by `tie validate`
+(docs/VALIDATION.md). Firm names are already masked: legal entities only, other firms as
+`NIP <nip>` or left out.
+
+| column | type | meaning |
+|---|---|---|
+| calibration_id | int8 | id of the calibration run |
+| run_at | timestamptz | when the run was made |
+| kind | text | `summary` or `case` |
+| position | int4 | 0 for the summary, then case order |
+| source | text | `uokik` (decision of the President of UOKiK) or `kio` (KIO ruling) |
+| case_key | text | decision number (`RLU-7/2023`) or signature (`KIO 2378/21`) |
+| name | text | display name of the case |
+| year | int4 | year of the decision or ruling |
+| sector | text | sector (UOKiK only) |
+| region | text | region (UOKiK only) |
+| decision | text | `upheld` (collusion proven), `overturned` (KIO: not proven), `other` |
+| detected | bool | did the engine flag it; null = could not be evaluated |
+| status | text | `detected`, `missed` or `not_evaluable` |
+| reason | text | why not evaluated or missed (e.g. `background_too_small`, `not_in_same_cluster`) |
+| oecd_items | text[] | OECD items that fired |
+| percentile | float8 | UOKiK: median percentile of the rigged tenders in their market |
+| probability | float8 | engine probability of the cluster holding the colluders |
+| firms | jsonb | array of public firm labels |
+| detail | jsonb | `tenders`, `pairs`, `market`, `patterns`, `engine` (test details) |
+| metrics | jsonb | summary row only: results of tests A, B, C, calibration, gate |
+| params | jsonb | summary row only: proposed thresholds and gate parameters |

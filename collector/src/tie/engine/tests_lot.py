@@ -177,3 +177,9 @@ def compute_lot_tests(conn: psycopg.Connection, run_id: int) -> int:
                 {"price_winner": _money(won), "estimated_value": _money(est)},
             ))
     return write_results(conn, run_id, "lot", LOT_TESTS, observations)
+
+
+# Pure screens on a list of valid prices (value, evidence), shared with `tie.validation`,
+# which scores the bids of gold cases in memory with exactly the engine's arithmetic.
+relative_distance = _relative_distance
+identical_prices = _identical
