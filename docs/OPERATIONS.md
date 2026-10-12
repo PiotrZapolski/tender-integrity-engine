@@ -23,10 +23,47 @@ Production runs on one box under `/var/www/tie/`, as a Docker Compose project na
 ## Daily operation
 
 - `cron` (supercronic, `collector/crontab`) runs `tie daily` at 23:00 UTC (01:00 in Poland
-  during summer time) and `tie stats` every 30 minutes.
+  during summer time), `tie engine-run` at 02:30 UTC and `tie stats` every 30 minutes.
 - `worker` runs `tie worker`. Keep exactly one `worker` replica: the budget and dedup logic
   assume a single worker. Do not use `--scale worker=N`.
 - `migrate` runs `tie migrate` once on every `up`, before `worker` and `cron` start.
+
+## Engine
+
+The analysis engine (markets, OECD tests, co-bidder clusters, signals, explanations) runs
+once a day. At 02:30 UTC `cron` runs `tie engine-run`, which only queues an `engine_run`
+job (payload `{"as_of": "<today>", "full": false}`); the single `worker` runs it, so the
+engine shares the worker's CPU and memory limits and the AI budget. While a long backfill
+is queued the job waits behind the older ready jobs.
+
+Each run gets a new row in `engine_runs` and goes through: OECD catalog seed, markets,
+pairs, clusters, lot, firm, pair and market tests, signals (Jev decision, or the fallback
+regression with status at most `review` when `JEV_API_KEY` is missing or the budget is
+spent), and explanations of published signals that have none for their current evidence
+(DeepSeek when `DEEPSEEK_API_KEY` is set, otherwise the template). A step that fails marks
+the run `failed` with the step and the error in `params`, and the job is retried with the
+usual backoff. A second run on the same day is safe: it gets a new `run_id`, signals keep
+their `signal_id`, and unchanged evidence is not sent to Jev again.
+
+Run it by hand, from `/var/www/tie/infra`:
+
+- queue a run for the worker (as cron does): `... run --rm worker tie engine-run`;
+- for another date or flagged as a full recompute: `tie engine-run --as-of 2026-10-01 --full`
+  (`--full` is only recorded in `params` for now; every run recomputes all markets);
+- run it in the foreground and print the counters as JSON:
+  `docker compose -f docker-compose.yml -f docker-compose.prod.yml run --rm worker tie engine-run --now`.
+
+Only one run works at a time (Postgres advisory lock); a second one fails with "another
+engine run is in progress" and its job is retried later. A run still `running` after 12
+hours (worker killed) is marked `failed` by the next run. Check the latest runs:
+
+```sql
+select run_id, as_of, status, started_at, finished_at - started_at took,
+       params->'counts' counts, params->>'failed_step' step, params->>'error' error
+from engine_runs order by run_id desc limit 10;
+```
+
+Signals by status: `select status, count(*) from signals group by 1;`.
 
 ## Monitoring
 
