@@ -29,10 +29,17 @@ class Extracted:
 def extract_text(data: bytes, file_name: str) -> Extracted:
     ext = Path(file_name).suffix.lower()
     if ext == ".pdf":
-        return _extract_pdf(data)
-    if ext == ".docx":
-        return Extracted(text=_extract_docx(data), method="docx")
-    raise UnsupportedDocument(f"unsupported document type: {file_name!r}")
+        extracted = _extract_pdf(data)
+    elif ext == ".docx":
+        extracted = Extracted(text=_extract_docx(data), method="docx")
+    else:
+        raise UnsupportedDocument(f"unsupported document type: {file_name!r}")
+    return Extracted(text=_normalize_spaces(extracted.text), method=extracted.method)
+
+
+def _normalize_spaces(text: str) -> str:
+    """Amounts use no-break spaces as thousands separators; make them plain spaces."""
+    return text.replace(" ", " ").replace(" ", " ")
 
 
 def _extract_pdf(data: bytes) -> Extracted:
