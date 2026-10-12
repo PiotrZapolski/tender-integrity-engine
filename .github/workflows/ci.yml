@@ -34,8 +34,8 @@ jobs:
       - uses: actions/checkout@v4
       - run: docker build -t tie-collector collector
       # Proves the SQL migration ships inside the non-editable wheel.
-      # Task 16 adds a `tie --help` step once the CLI exists.
       - run: >-
           docker run --rm tie-collector python -c "from importlib import resources;
           assert resources.files('tie.migrations').joinpath('001_init.sql').is_file();
           import tie.config, tie.db, tie.jobs, tie.http"
+      - run: docker run --rm tie-collector tie --help
