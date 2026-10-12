@@ -18,6 +18,7 @@ from tie.db import connect, migrate
 from tie.gold.extract import GOLD_RATES, export_gold, run_gold_extract
 from tie.gold.sources import UOKIK_DECISIONS, get_decision
 from tie.handlers import Context, run_once
+from tie.identity import msig
 from tie.identity.bidders import MAX_IDENTITY_FAILURES
 from tie.jobs import enqueue, requeue_stale
 
@@ -74,13 +75,19 @@ def cmd_backfill(args: argparse.Namespace) -> int:
 def cmd_daily(args: argparse.Namespace) -> int:
     t = today()
     added = 0
-    with _connect() as conn:
+    settings = load_settings()
+    with connect(settings.database_url) as conn:
         for back in (1, 2):
             iso = (t - timedelta(days=back)).isoformat()
             # The run date in the key forces a fresh fetch of a day that may have been done.
             added += enqueue(conn, "bzp_day", f"{iso}@{t.isoformat()}", {"date": iso})
         added += enqueue(conn, "identity", t.isoformat())
         added += enqueue(conn, "whitelist", t.isoformat())
+        if settings.person_hmac_secret:
+            added += msig.enqueue_due(conn, t, settings.msig_daily_cap,
+                                       settings.msig_recheck_days)
+        else:
+            log.warning("daily: PERSON_HMAC_SECRET not set, msig_board jobs not queued")
     log.info("daily %s: %d new jobs", t, added)
     return 0
 

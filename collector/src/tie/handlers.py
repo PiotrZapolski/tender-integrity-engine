@@ -26,6 +26,7 @@ from tie.config import Settings
 from tie.db import connect
 from tie.ezam.documents import download_document, sync_documents
 from tie.http import PoliteClient
+from tie.identity import msig
 from tie.identity.bidders import UNMATCHED_SQL, resolve_unmatched_bids
 from tie.identity.whitelist import enrich_bidders
 from tie.jobs import MAX_ERROR_LEN, claim, complete, enqueue, fail
@@ -44,6 +45,8 @@ RATES: dict[str, float] = {
     "api.deepseek.com": 0.2,
     # One gap for all *.ezamawiajacy.pl subdomains (one Marketplanet platform behind them).
     ezamawiajacy.DOMAIN: ezamawiajacy.MIN_GAP_S,
+    # MSiG publishes no limit; research paced it at 0.6 s or slower, we stay at 1 s.
+    "wyszukiwarka-msig.ms.gov.pl": 1.0,
 }
 # Extra statuses retried per host: the e-Zamowienia WAF intermittently answers 403 under
 # load, and the same request succeeds minutes later.
@@ -196,6 +199,11 @@ def _whitelist(ctx: Context, payload: dict) -> None:
     log.info("whitelist: %d bidders enriched, %d still unchecked", total, left)
 
 
+def _msig_board(ctx: Context, payload: dict) -> None:
+    secret = ctx.settings.person_hmac_secret if ctx.settings else None
+    msig.run_job(ctx.conn, ctx.client, secret, payload)
+
+
 HANDLERS: dict[str, Callable[[Context, dict], None]] = {
     "bzp_day": _bzp_day,
     "ezam_docs": _ezam_docs,
@@ -205,6 +213,7 @@ HANDLERS: dict[str, Callable[[Context, dict], None]] = {
     "opening_parse": _opening_parse,
     "identity": _identity,
     "whitelist": _whitelist,
+    "msig_board": _msig_board,
 }
 
 
