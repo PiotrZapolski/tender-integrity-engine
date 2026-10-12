@@ -171,7 +171,7 @@ def test_deterministic_path_skips_llm(db, fixtures, tmp_path):
     bids = db.execute("select * from bids order by offer_no").fetchall()
     assert [b["bidder_nip_raw"] for b in bids] == ["5932335316", "5260250274"]
     assert all(b["parse_method"] == "deterministic" for b in bids)
-    assert all(b["price_scale"] == D("1") for b in bids)
+    assert all(b["price_scale"] == D(1) for b in bids)
     winner_id = db.execute("select winner_bidder_id from lots").fetchone()["winner_bidder_id"]
     assert bids[0]["is_winner"] is True and bids[0]["rank"] == 1
     assert bids[0]["bidder_id"] == winner_id
