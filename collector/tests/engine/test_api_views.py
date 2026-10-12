@@ -386,6 +386,58 @@ def test_signal_of_older_run_is_hidden_after_newer_done_run(db, world):
     assert all(r["signal_ids"] == [] for r in _rows(db, "buyers"))
 
 
+def test_signal_refreshed_by_a_running_run_stays_public(db, world):
+    """I1: upsert_signals moves run_id to the running run cluster by cluster; those signals
+    must not vanish from the API before the run is done."""
+    running = db.execute(
+        "insert into engine_runs(as_of, status) values (%s, 'running') returning run_id",
+        (world["as_of"],)).fetchone()["run_id"]
+    db.execute(
+        "insert into clusters(run_id, cluster_id, market_id, members, n_lots, density)"
+        " select %s, cluster_id, market_id, members, n_lots, density from clusters"
+        " where run_id = %s",
+        (running, world["run_id"]))
+    db.execute("update signals set run_id = %s where signal_id = %s", (running, CLUSTER_ID))
+    db.commit()
+    assert [r["signal_id"] for r in _rows(db, "signals")] == [CLUSTER_ID]
+    assert [r["signal_id"] for r in _rows(db, "signal_detail")] == [CLUSTER_ID]
+    assert _rows(db, "stats")[0]["signals_published"] == 1
+
+    # The run finishes: the refreshed signal stays, members still resolve.
+    db.execute("update engine_runs set status = 'done', finished_at = now() where run_id = %s",
+               (running,))
+    db.commit()
+    rows = _rows(db, "signals")
+    assert [r["signal_id"] for r in rows] == [CLUSTER_ID]
+    assert [m["bidder_id"] for m in rows[0]["members"]] == [str(m) for m in world["members"]]
+
+
+def test_company_token_jdg_without_whitelist_check_is_masked(db, world):
+    """I4: the name heuristic said "company" (is_jdg false), KRS unknown, whitelist not
+    checked yet: the name must not appear anywhere in api.*."""
+    name = "Usługi Remontowe Anna Nowakowska"
+    bidder = world["review_members"][0]
+    db.execute("update bidders set name = %s, is_jdg = false, krs = null,"
+               " wl_checked_at = null where id = %s", (name, bidder))
+    # The same bidder after the whitelist confirmed KRS is shown by name again.
+    checked = world["members"][1]
+    db.execute("update bidders set wl_checked_at = now() where id = %s", (checked,))
+    db.commit()
+    nip = _bidder(db, bidder)["nip"]
+    folded = _fold(name)
+    everything = []
+    for view in CONTRACT:
+        for row in _rows(db, view):
+            text = _fold(json.dumps(row, default=str, ensure_ascii=False))
+            assert folded not in text and "nowakowska" not in text, view
+            everything.append(text)
+    rows = {r["bidder_id"]: r for r in _rows(db, "bidders")}
+    assert rows[str(bidder)]["display_name"] == f"NIP {nip}"
+    assert rows[str(bidder)]["krs"] is None
+    assert rows[str(checked)]["display_name"] == _bidder(db, checked)["name"]
+    assert f"nip {nip}" in "\n".join(everything)
+
+
 def test_mask_text_is_literal_and_case_insensitive(db):
     got = db.execute(
         "select tie_mask_text(%s, %s, %s) t",
