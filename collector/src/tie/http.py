@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import time
+from typing import Self
 from urllib.parse import urlparse
 
 import httpx
@@ -76,7 +77,7 @@ class PoliteClient:
     def close(self) -> None:
         self.client.close()
 
-    def __enter__(self) -> PoliteClient:
+    def __enter__(self) -> Self:
         return self
 
     def __exit__(self, *exc) -> None:
