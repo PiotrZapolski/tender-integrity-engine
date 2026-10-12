@@ -24,8 +24,14 @@ Production runs on one box under `/var/www/tie/`, as a Docker Compose project na
 
 - `cron` (supercronic, `collector/crontab`) runs `tie daily` at 23:00 UTC (01:00 in Poland
   during summer time) and `tie stats` every 30 minutes.
-- `worker` runs `tie worker`. Keep exactly one `worker` replica: the budget and dedup logic
-  assume a single worker. Do not use `--scale worker=N`.
+- Workers are split by job kind so one slow host never blocks the rest:
+  - `worker-ezam`: `bzp_day`, `ezam_docs`, `ezam_download` (the only process talking to
+    ezamowienia.gov.pl, so its 2 s gap holds). Keep one replica.
+  - `worker-parse` (3 replicas): `opening_parse` (text extraction, OCR, DeepSeek). Jobs are
+    claimed with `FOR UPDATE SKIP LOCKED`; the daily AI budget can be overshot by at most the
+    calls in flight (3).
+  - `worker`: ezamawiajacy, identity (Jev), whitelist, MSiG, engine. Keep one replica: each
+    external host must be served by exactly one process so per-host rate limits hold.
 - `migrate` runs `tie migrate` once on every `up`, before `worker` and `cron` start.
 
 ## Monitoring

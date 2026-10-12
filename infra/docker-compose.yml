@@ -19,11 +19,14 @@ services:
     command: ["tie", "migrate"]
     depends_on: { db: { condition: service_healthy } }
   # Exactly one worker replica: budget and dedup logic assume a single worker.
+  # Workers are split by job kind so a slow host (e-Zamowienia, 2 s between requests)
+  # never blocks parsing or other hosts. Per-host rate limits live in each process, so
+  # each external host is served by exactly one worker kind.
   worker:
     build: ../collector
     image: tie-collector
     env_file: .env
-    command: ["tie", "worker"]
+    command: ["tie", "worker", "--kinds", "ezamawiajacy_docs,ezamawiajacy_download,identity,whitelist,msig_board,engine_run"]
     volumes: ["${RAW_HOST_DIR:-./data/raw}:/data/raw"]
     depends_on: { migrate: { condition: service_completed_successfully } }
     cpus: 4
@@ -32,6 +35,28 @@ services:
     # Let the current job finish on deploy instead of SIGKILL after Docker's default 10 s.
     # An identity job runs up to 10 minutes before it queues a continuation.
     stop_grace_period: 15m
+  worker-ezam:
+    image: tie-collector
+    env_file: .env
+    command: ["tie", "worker", "--kinds", "bzp_day,ezam_docs,ezam_download"]
+    volumes: ["${RAW_HOST_DIR:-./data/raw}:/data/raw"]
+    depends_on: { migrate: { condition: service_completed_successfully } }
+    cpus: 1
+    mem_limit: 2g
+    restart: unless-stopped
+    stop_grace_period: 2m
+  worker-parse:
+    image: tie-collector
+    env_file: .env
+    command: ["tie", "worker", "--kinds", "opening_parse"]
+    volumes: ["${RAW_HOST_DIR:-./data/raw}:/data/raw"]
+    depends_on: { migrate: { condition: service_completed_successfully } }
+    deploy:
+      replicas: 3
+    cpus: 1.5
+    mem_limit: 2g
+    restart: unless-stopped
+    stop_grace_period: 5m
   cron:
     build: ../collector
     image: tie-collector
