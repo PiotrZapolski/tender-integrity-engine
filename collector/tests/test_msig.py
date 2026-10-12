@@ -179,7 +179,7 @@ def test_parse_rejects_invalid_pesel_and_ignores_other_sections():
         "id": 1, "dateOfPublication": "2024-03-01T00:00:00",
         "textInBody": (
             "W dniu 17 .02 .2024 dokonano wpisu do rejestru KRS  nr 9 następującej treści: "
-            "Dz. 2. Rub. 1. Organ uprawniony do reprezentacji podmiotu "
+            "Dz.\u00a02.\u00a0Rub.\u00a01. Organ uprawniony do reprezentacji podmiotu "
             "PRub. Dane osób wchodzących w skład organu wpisać: "
             "1 1. NOWAK 2. JAN 3. 72031501235 5. PREZES ZARZĄDU "
             "2 1. KOT 2. ADAM 3. 8011200456 5 5. CZŁONEK ZARZĄDU "

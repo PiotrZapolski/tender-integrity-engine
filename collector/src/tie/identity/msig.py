@@ -151,7 +151,7 @@ def person_key(secret: str | None, surname: str, given: str, pesel: str) -> str:
 
 
 def _normalize_text(text: str) -> str:
-    return re.sub(r"\s+", " ", (text or "").replace(" ", " "))
+    return re.sub(r"\s+", " ", (text or "").replace("\u00a0", " "))
 
 
 def _clean_name(text: str) -> str:
