@@ -20,17 +20,18 @@ Awarded lot = a lot of the run's markets with `lots.winner_bidder_id`. Lot date 
   group's lots in date order: switches (consecutive awards to different members) plus
   windows of k consecutive awards won by k different members. The same members at several
   buyers of one market form one group; the percentile is the observed statistic against
-  `PERMUTATIONS` draws of the winner labels permuted within each buyer (counts kept, so only
-  the order is tested, as in 3.1.2). Value = coverage x balance (normalized entropy of the
-  members' wins) x turn statistic / its maximum.
+  `ROTATION_PERMUTATIONS` (2000) draws of the winner labels permuted within each buyer
+  (counts kept, so only the order is tested, as in 3.1.2). Value = coverage x balance
+  (normalized entropy of the members' wins) x turn statistic / its maximum. Strong (decision
+  gate) only from percentile 0.999 (`STRONG_MIN_PCT`).
 - `bzp.spread` (OECD 3.3.7 from min/max, levels `firm` and `cluster`): for lots with
   `n_offers >= 3`, no rejection (`n_rejected` 0 or unknown) and `price_max > price_min > 0`
   the spread `price_max / price_min` (equal prices are left out: in BZP they mostly mean the
   notice repeats one price). Firm: the median spread of its won lots (at least
   `MIN_FIRM_LOTS`), percentile among the firms of the market, narrow = high. Cluster: the
   median and the coefficient of variation of the spreads of the cluster's lots against
-  `PERMUTATIONS` random samples of as many lots of the market; the percentile is the higher of
-  "narrow" and "near-constant".
+  `SPREAD_SAMPLES` random samples of as many lots of the market; the percentile is the
+  higher of "narrow" and "near-constant".
 - `bzp.over_estimate` (OECD 3.3.9, level `firm`): median `price_winner / estimated_value` of
   the firm's won lots in the market (at least `MIN_FIRM_LOTS`), percentile among the firms of
   the market, high = signal.
@@ -46,11 +47,12 @@ same members from both sources make one cluster). `n_lots` = awarded lots of the
 by a member; for a cluster found only by rotation those are restricted to the rotation buyers
 (`clusters.buyers`), otherwise the whole market (`buyers` null). `density` stays null. They
 go through the usual evidence, decision and explanation steps (`tie.engine.decide` applies
-their gates and caps them at `review`).
+their gates, asks for two independent supports and caps them at `review`).
 
 Percentiles of firm tests are computed only within the market and are null below `MIN_OBS`
 firms. Everything is loaded with set-based SQL (one pass over the run's awarded lots through a
-server-side cursor into numpy arrays); permutations are bounded by `PERMUTATIONS`.
+server-side cursor into numpy arrays); draws are bounded by `ROTATION_PERMUTATIONS` and
+`SPREAD_SAMPLES`.
 """
 
 from __future__ import annotations
@@ -90,7 +92,7 @@ OECD_ITEM = {
     TEST_SHARED: "3.2.11",
 }
 # A BZP-only test counts as a strong item of the decision gate only from this percentile.
-STRONG_MIN_PCT = {TEST_ROTATION: 0.99}
+STRONG_MIN_PCT = {TEST_ROTATION: 0.999}
 CLUSTER_PREFIX = "w:"
 
 MIN_ROTATION_LOTS = 6
@@ -99,7 +101,8 @@ MAX_GROUP = 5
 MIN_MEMBER_WINS = 2
 MEMBER_OF_TOP = 0.5
 MIN_COVERAGE = 0.6
-PERMUTATIONS = 500
+ROTATION_PERMUTATIONS = 2000
+SPREAD_SAMPLES = 500
 MIN_SPREAD_OFFERS = 3
 MIN_FIRM_LOTS = 3
 MIN_OBS = 10
@@ -360,7 +363,7 @@ def rotation_result(cluster_id: str, members: tuple[int, ...],
     k = len(members)
     observed = 0
     maximum = 0
-    simulated = np.zeros(PERMUTATIONS, dtype=np.float64)
+    simulated = np.zeros(ROTATION_PERMUTATIONS, dtype=np.float64)
     rng = np.random.default_rng(zlib.crc32(cluster_id.encode("utf-8")))
     wins = [0] * k
     awarded = 0
@@ -368,7 +371,7 @@ def rotation_result(cluster_id: str, members: tuple[int, ...],
     for run in sorted(runs, key=lambda r: r.buyer):
         observed += int(turns(run.labels, k)[0])
         maximum += max_turns(len(run.labels), k)
-        draws = rng.permuted(np.tile(run.labels, (PERMUTATIONS, 1)), axis=1)
+        draws = rng.permuted(np.tile(run.labels, (ROTATION_PERMUTATIONS, 1)), axis=1)
         simulated += turns(draws, k)
         counts = np.bincount(run.labels, minlength=k)
         for i in range(k):
@@ -400,7 +403,7 @@ def rotation_result(cluster_id: str, members: tuple[int, ...],
         "turns": observed,
         "max_turns": maximum,
         "expected_turns": round(float(simulated.mean()), 3),
-        "draws": PERMUTATIONS,
+        "draws": ROTATION_PERMUTATIONS,
         "n_buyers": len(buyers),
         "buyers": buyers[:MAX_EVIDENCE_ROWS],
     }
@@ -478,7 +481,7 @@ def spread_cluster_result(cluster_id: str, spreads: np.ndarray,
     percentile = None
     if reference is not None and len(reference) >= MIN_OBS:
         rng = np.random.default_rng(zlib.crc32(("spread|" + cluster_id).encode("utf-8")))
-        sample = reference[rng.integers(0, len(reference), size=(PERMUTATIONS, len(x)))]
+        sample = reference[rng.integers(0, len(reference), size=(SPREAD_SAMPLES, len(x)))]
         medians = np.median(sample, axis=1)
         means = sample.mean(axis=1)
         cvs = sample.std(axis=1, ddof=1) / np.where(means > 0, means, np.nan)
@@ -488,7 +491,7 @@ def spread_cluster_result(cluster_id: str, spreads: np.ndarray,
         percentile = max(p_narrow, p_const)
         evidence.update({"pct_narrow": round(p_narrow, 4), "pct_constant": round(p_const, 4),
                          "market_median": round(float(np.median(reference)), 6),
-                         "draws": PERMUTATIONS})
+                         "draws": SPREAD_SAMPLES})
     return {"value": median, "percentile": percentile, "n_obs": len(x),
             "evidence": evidence}
 

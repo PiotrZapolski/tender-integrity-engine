@@ -101,7 +101,7 @@ each maps to one OECD item:
 - `bzp.winner_rotation` (3.1.6): per buyer and market, a group of 2-5 firms that wins at
   least 60% of the buyer's awarded lots (at least 6 lots), with no dominating member, and
   hands the wins over between consecutive awards more often than chance (percentile against
-  500 permutations of the winners within each buyer).
+  2000 permutations of the winners within each buyer).
 - `bzp.spread` (3.3.7): `price_max / price_min` for lots with 3+ offers and no rejection;
   narrow or near-constant spreads of a firm's or a group's won lots against its market.
 - `bzp.over_estimate` (3.3.9): median `price_winner / estimated_value` per winner and market.
@@ -111,16 +111,26 @@ each maps to one OECD item:
 Rotation groups and connected shared-data groups become winner-based clusters
 (`clusters.cluster_id` starting with `w:`; `clusters.buyers` holds the rotation buyers when
 the lots are limited to them). They get the usual evidence (`"basis": "bzp_winners"`, the
-`bzp.*` result under its OECD item with a `test` field), Jev decision and gates, with three
-differences: `bzp.winner_rotation` counts as a strong item only with a percentile of at least
-0.99 (`bzp.shared_winners` is strong, spread and over-estimate stay weak); a rotation at a
-single buyer passes the two-buyer rule when the cluster has at least 10 lots (gate
-`single_buyer_rotation`); and a `w:` signal is never above `review`, whatever
-`ENGINE_MAX_STATUS` says. The run counts carry `"bzp_only"` with the seconds of each sub-step:
+`bzp.*` result under its OECD item with a `test` field), Jev decision and gates, with these
+differences:
+
+- `bzp.winner_rotation` (2000 permutations) counts as a strong item only with a percentile
+  of at least 0.999; `bzp.shared_winners` is strong, spread and over-estimate stay weak.
+- Two independent supports are needed for gate `ok`: a strong rotation together with shared
+  winners, or with `bzp.spread` / `bzp.over_estimate` at a percentile of at least 0.9, or
+  shared winners alone (shared bank account or address). Otherwise the gate is `weak_only`.
+  The reason is in `signals.evidence->'decision'->>'gate_detail'` (for example
+  `rotation+spread`, `shared_winners`, `rotation_without_second_support`).
+- A rotation at a single buyer passes the two-buyer rule when the cluster has at least 10
+  lots and the supports above hold (gate `single_buyer_rotation`).
+- A `w:` signal is never above `review`, whatever `ENGINE_MAX_STATUS` says.
+
+The run counts carry `"bzp_only"` with the seconds of each sub-step:
 
 ```sql
 select params->'counts'->'bzp_only' from engine_runs order by run_id desc limit 1;
-select signal_id, status, evidence->'decision'->>'gate' gate, (evidence->>'n_lots')::int n,
+select signal_id, status, evidence->'decision'->>'gate' gate,
+       evidence->'decision'->>'gate_detail' detail, (evidence->>'n_lots')::int n,
        oecd from signals where signal_id like 'w:%' order by probability desc limit 20;
 ```
 

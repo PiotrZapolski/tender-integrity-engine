@@ -26,9 +26,12 @@ do `signals.evidence.decision.gate` (`ok`, `min_lots`, `min_buyers`, `weak_only`
 Klastry zwycięzców z testów BZP-only (`cluster_id` z prefiksem `w:`, `tie.engine.bzp_only`):
 te same progi, ale rotacja zwycięzców u jednego zamawiającego wystarcza zamiast 2
 zamawiających, gdy klaster ma co najmniej 10 części (`single_buyer_rotation`); mocne są tylko
-`bzp.winner_rotation` z percentylem co najmniej 0.99 (punkt 3.1.6) i `bzp.shared_winners`
-(3.2.11), `bzp.spread` (3.3.7) i `bzp.over_estimate` (3.3.9) zostają słabe. Status takiego
-klastra jest zawsze co najwyżej `review`, także przy `ENGINE_MAX_STATUS=published`.
+`bzp.winner_rotation` z percentylem co najmniej 0.999 (punkt 3.1.6) i `bzp.shared_winners`
+(3.2.11), `bzp.spread` (3.3.7) i `bzp.over_estimate` (3.3.9) zostają słabe. Wynik `ok` (lub
+`single_buyer_rotation`) wymaga dwóch niezależnych oparć: mocnej rotacji razem z 3.2.11 albo
+z 3.3.7 / 3.3.9 z percentylem co najmniej 0.9, albo samego 3.2.11 (wspólny rachunek lub
+adres); inaczej `weak_only`. Powód trafia do `signals.evidence.decision.gate_detail`. Status
+takiego klastra jest zawsze co najwyżej `review`, także przy `ENGINE_MAX_STATUS=published`.
 
 Błędy Jev: odpowiedź 4xx inna niż 429 (zły klucz, zły kształt zapytania, zła nazwa modelu)
 wyłącza Jev do końca przebiegu, tak samo przekroczony budżet i kilka kolejnych błędów innego
@@ -93,6 +96,8 @@ GATE_SINGLE_BUYER = "single_buyer_rotation"
 SINGLE_BUYER_MIN_LOTS = 10
 # Klastry zwycięzców (tylko BZP, bez ofert z dokumentów) nigdy nie są publikowane.
 WINNER_CLUSTER_MAX_STATUS = "review"
+# Drugie oparcie mocnej rotacji zwycięzców: 3.3.7 albo 3.3.9 z co najmniej takim percentylem.
+SECOND_SUPPORT_PCT = 0.9
 # Regresja zapasowa: stałe wagi na wejściach testów (percentyl 0..1), wyraz wolny.
 FALLBACK_WEIGHTS = {
     "3.1.6": 2.0,
@@ -304,7 +309,7 @@ def status_for(decision: Decision, publish_threshold: float, review_threshold: f
 
 def _strong_enough(numbers: dict) -> bool:
     """Punkt z testu BZP-only (pole `test`) jest mocny dopiero od percentyla
-    `bzp_only.STRONG_MIN_PCT` tego testu (rotacja zwycięzców: 0.99)."""
+    `bzp_only.STRONG_MIN_PCT` tego testu (rotacja zwycięzców: 0.999)."""
     floor = STRONG_MIN_PCT.get(numbers.get("test"))
     if floor is None:
         return True
@@ -331,13 +336,38 @@ def _buyer_rotation(evidence: dict) -> bool:
     return isinstance(numbers, dict) and numbers.get("test") == TEST_ROTATION
 
 
+def winner_support(decision: Decision, evidence: dict) -> tuple[bool, str]:
+    """(czy klaster zwycięzców ma dwa niezależne oparcia, opis dla `gate_detail`).
+
+    Przechodzi: wspólny rachunek lub adres (3.2.11, mocny sam w sobie) albo mocna rotacja
+    (3.1.6) razem z drugim oparciem: 3.2.11, rozrzutem cen (3.3.7) albo ceną ponad szacunek
+    (3.3.9) z percentylem co najmniej `SECOND_SUPPORT_PCT`."""
+    fired = strong_items_fired(decision, evidence)
+    oecd = evidence.get("oecd") or {}
+    shared = "3.2.11" in fired
+    seconds = ["shared_winners"] if shared else []
+    for item, name in (("3.3.7", "spread"), ("3.3.9", "over_estimate")):
+        numbers = oecd.get(item)
+        pct = numbers.get("pct") if isinstance(numbers, dict) else None
+        if pct is not None and float(pct) >= SECOND_SUPPORT_PCT:
+            seconds.append(name)
+    if "3.1.6" in fired:
+        if seconds:
+            return True, "rotation+" + "+".join(seconds)
+        return False, "rotation_without_second_support"
+    if shared:
+        return True, "shared_winners"
+    return False, "no_strong_support"
+
+
 def evidence_gate(decision: Decision, evidence: dict, min_lots: int) -> tuple[str, str]:
     """(wynik bramki, najwyższy dozwolony status) dla minimalnych dowodów klastra.
 
     Klaster zwycięzców (`w:`, `tie.engine.bzp_only`) ma te same progi, z jednym wyjątkiem:
     rotacja u jednego zamawiającego przechodzi bramkę zamawiających przy co najmniej
-    `SINGLE_BUYER_MIN_LOTS` częściach (wynik `single_buyer_rotation`). Taki klaster jest
-    zawsze co najwyżej `review` (`WINNER_CLUSTER_MAX_STATUS`)."""
+    `SINGLE_BUYER_MIN_LOTS` częściach (wynik `single_buyer_rotation`). Poza tym potrzebuje
+    dwóch niezależnych oparć (`winner_support`), inaczej wynik to `weak_only`. Taki klaster
+    jest zawsze co najwyżej `review` (`WINNER_CLUSTER_MAX_STATUS`)."""
     winners = is_winner_cluster(evidence.get("cluster_id"))
     n_lots = int(evidence.get("n_lots") or 0)
     if n_lots < min_lots:
@@ -347,12 +377,13 @@ def evidence_gate(decision: Decision, evidence: dict, min_lots: int) -> tuple[st
         if not (winners and _buyer_rotation(evidence) and n_lots >= SINGLE_BUYER_MIN_LOTS):
             return GATE_MIN_BUYERS, "hidden"
         single_buyer = True
+    if winners:
+        if not winner_support(decision, evidence)[0]:
+            return GATE_WEAK_ONLY, "review"
+        return (GATE_SINGLE_BUYER if single_buyer else GATE_OK), WINNER_CLUSTER_MAX_STATUS
     if not strong_items_fired(decision, evidence):
         return GATE_WEAK_ONLY, "review"
-    gate = GATE_SINGLE_BUYER if single_buyer else GATE_OK
-    if winners:
-        return gate, WINNER_CLUSTER_MAX_STATUS
-    return gate, "published"
+    return GATE_OK, "published"
 
 
 def final_status(decision: Decision, evidence: dict, publish_threshold: float,
@@ -376,9 +407,10 @@ def _stored_decision(row: dict) -> Decision | None:
 
 def _upsert(conn: psycopg.Connection, run_id: int, cluster: dict, evidence: dict, ehash: str,
             decision: Decision, status: str, gate: str) -> None:
-    stored = {**evidence, "market_id": cluster["market_id"],
-              "decision": {"source": decision.source, "strength": decision.strength,
-                           "gate": gate}}
+    meta = {"source": decision.source, "strength": decision.strength, "gate": gate}
+    if is_winner_cluster(cluster["cluster_id"]):
+        meta["gate_detail"] = winner_support(decision, evidence)[1]
+    stored = {**evidence, "market_id": cluster["market_id"], "decision": meta}
     conn.execute(
         "insert into signals(signal_id, run_id, cluster_id, market_id, probability, strength,"
         " oecd, status, evidence_hash, evidence)"

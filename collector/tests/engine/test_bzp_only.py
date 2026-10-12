@@ -7,10 +7,11 @@ import pytest
 
 from tie.engine.bzp_only import (
     CLUSTER_PREFIX,
-    PERMUTATIONS,
+    ROTATION_PERMUTATIONS,
     TEST_OVER_ESTIMATE,
     TEST_ROTATION,
     TEST_SHARED,
+    TEST_SPREAD,
     compute_bzp_only,
     max_turns,
     pick_group,
@@ -25,6 +26,7 @@ from tie.engine.decide import (
     evidence_gate,
     strong_items_fired,
     upsert_signals,
+    winner_support,
 )
 from tie.engine.evidence import build_evidence
 from tie.engine.markets import assign_markets
@@ -57,9 +59,11 @@ def _prepare(db, as_of=AS_OF) -> int:
 
 
 def _rotating_buyer(db, *, cpv=CPV, province="PL22", n_lots=15, n_firms=3,
-                    start=date(2023, 3, 1), step_days=65, tag="rot"):
+                    start=date(2023, 3, 1), step_days=65, tag="rot", n_offers=3,
+                    price=95000):
     """One buyer whose repeated tenders (5 a year) go to `n_firms` firms in turn. Only BZP
-    facts: no opening documents, no bids."""
+    facts: no opening documents, no bids. Estimate 100000, winning price `price`, the
+    highest offer a near-constant 9-11% above it."""
     buyer = db.execute(
         "insert into buyers(nip, name, province) values (%s, %s, %s) returning id",
         (f"{tag}-buyer", f"Gmina Rotacyjna {tag}", province)).fetchone()["id"]
@@ -81,10 +85,10 @@ def _rotating_buyer(db, *, cpv=CPV, province="PL22", n_lots=15, n_firms=3,
         lots.append(db.execute(
             "insert into lots(procedure_id, lot_no, cpv, estimated_value, outcome, n_offers,"
             " n_rejected, price_min, price_max, price_winner, contract_value, contract_date,"
-            " winner_bidder_id) values (%s, 1, %s, 100000, 'umowa', 3, 0, 95000, %s, 95000,"
-            " 95000, %s, %s) returning id",
-            (ocds_id, cpv, 104000 + 150 * k, published.date() + timedelta(days=14),
-             firms[k % n_firms])).fetchone()["id"])
+            " winner_bidder_id) values (%s, 1, %s, 100000, 'umowa', %s, 0, %s, %s, %s,"
+            " %s, %s, %s) returning id",
+            (ocds_id, cpv, n_offers, price, price + 9000 + 150 * k, price, price,
+             published.date() + timedelta(days=14), firms[k % n_firms])).fetchone()["id"])
     db.commit()
     return {"buyer": buyer, "firms": firms, "lots": lots}
 
@@ -116,38 +120,67 @@ def _decision(**per_item) -> Decision:
                     source="jev")
 
 
-def _rotation_evidence(pct, *, n_lots=12, n_buyers=1, cluster_id="w:0123"):
-    return {"cluster_id": cluster_id, "n_lots": n_lots, "n_buyers": n_buyers,
-            "oecd": {"3.1.6": {"level": "cluster", "value": 0.9, "pct": pct, "n": 1,
-                               "test": TEST_ROTATION}}}
+def _rotation_evidence(pct, *, n_lots=12, n_buyers=1, cluster_id="w:0123", spread=None,
+                       over=None):
+    oecd = {"3.1.6": {"level": "cluster", "value": 0.9, "pct": pct, "n": 1,
+                      "test": TEST_ROTATION}}
+    if spread is not None:
+        oecd["3.3.7"] = {"level": "cluster", "value": 1.1, "pct": spread, "n": 1,
+                         "test": TEST_SPREAD}
+    if over is not None:
+        oecd["3.3.9"] = {"level": "firm", "value": 1.2, "pct": over, "n": 3,
+                         "test": TEST_OVER_ESTIMATE}
+    return {"cluster_id": cluster_id, "n_lots": n_lots, "n_buyers": n_buyers, "oecd": oecd}
 
 
-def test_rotation_is_strong_only_from_percentile_099():
+def test_rotation_is_strong_only_from_percentile_0999():
     decision = _decision(**{"3_1_6": 0.9})
-    assert strong_items_fired(decision, _rotation_evidence(0.995)) == ["3.1.6"]
-    assert strong_items_fired(decision, _rotation_evidence(0.95)) == []
+    assert strong_items_fired(decision, _rotation_evidence(0.9995)) == ["3.1.6"]
+    assert strong_items_fired(decision, _rotation_evidence(0.995)) == []
     # The co-bidder rotation (no `test`) keeps its usual rule.
     ev = _rotation_evidence(0.95)
     del ev["oecd"]["3.1.6"]["test"]
     assert strong_items_fired(decision, ev) == ["3.1.6"]
 
 
+def test_rotation_alone_is_weak_only():
+    """A strong rotation (pct >= 0.999) without a second independent support."""
+    decision = _decision(**{"3_1_6": 0.9, "3_3_7": 0.9, "3_3_9": 0.9})
+    for ev in (_rotation_evidence(0.9995), _rotation_evidence(0.9995, n_buyers=3),
+               _rotation_evidence(0.9995, spread=0.85, over=0.5)):
+        assert evidence_gate(decision, ev, 8) == (GATE_WEAK_ONLY, "review")
+        assert winner_support(decision, ev) == (False, "rotation_without_second_support")
+
+
+def test_rotation_with_narrow_spread_passes():
+    decision = _decision(**{"3_1_6": 0.9, "3_3_7": 0.9})
+    ev = _rotation_evidence(0.9995, spread=0.95)
+    # Buyer-level rotation: one buyer is enough with at least 10 lots, never above review.
+    assert evidence_gate(decision, ev, 8) == (GATE_SINGLE_BUYER, "review")
+    assert winner_support(decision, ev) == (True, "rotation+spread")
+    ev = _rotation_evidence(0.9995, n_buyers=2, over=0.92)
+    assert evidence_gate(decision, ev, 8) == (GATE_OK, "review")
+    assert winner_support(decision, ev) == (True, "rotation+over_estimate")
+    # The second support does not rescue a rotation below 0.999.
+    assert evidence_gate(decision, _rotation_evidence(0.995, spread=0.99), 8) == (
+        GATE_WEAK_ONLY, "review")
+
+
 def test_winner_cluster_gates():
     decision = _decision(**{"3_1_6": 0.9, "3_2_11": 0.9})
-    # Buyer-level rotation: one buyer is enough with at least 10 lots, never above review.
-    assert evidence_gate(decision, _rotation_evidence(0.995), 8) == (GATE_SINGLE_BUYER,
-                                                                      "review")
-    assert evidence_gate(decision, _rotation_evidence(0.995, n_lots=9), 8) == (
+    assert evidence_gate(decision, _rotation_evidence(0.9995, n_lots=9, spread=0.95), 8) == (
         GATE_MIN_BUYERS, "hidden")
-    assert evidence_gate(decision, _rotation_evidence(0.95, n_buyers=3), 8) == (
-        GATE_WEAK_ONLY, "review")
     # A co-bidder cluster keeps the two-buyer rule.
-    assert evidence_gate(decision, _rotation_evidence(0.995, cluster_id="c0ffee"), 8) == (
+    assert evidence_gate(decision, _rotation_evidence(0.9995, cluster_id="c0ffee"), 8) == (
         GATE_MIN_BUYERS, "hidden")
     shared = {"cluster_id": "w:abcd", "n_lots": 20, "n_buyers": 4,
               "oecd": {"3.2.11": {"level": "cluster", "value": 1.0, "pct": None, "n": 1,
                                   "test": TEST_SHARED}}}
+    # A shared bank account or address stays strong on its own.
     assert evidence_gate(decision, shared, 8) == (GATE_OK, "review")
+    assert winner_support(decision, shared) == (True, "shared_winners")
+    both = {**shared, "oecd": {**shared["oecd"], **_rotation_evidence(0.9995)["oecd"]}}
+    assert winner_support(decision, both) == (True, "rotation+shared_winners")
     # Shared data at a single buyer is not the rotation exception.
     assert evidence_gate(decision, {**shared, "n_buyers": 1}, 8) == (GATE_MIN_BUYERS, "hidden")
 
@@ -172,18 +205,20 @@ def test_rotating_buyer_is_detected(db, monkeypatch):
         "select value, percentile, n_obs, evidence from test_results"
         " where run_id = %s and test_id = %s and entity_key = %s",
         (run_id, TEST_ROTATION, cluster["cluster_id"])).fetchone()
-    assert row["percentile"] >= 0.99 and row["n_obs"] == 15
+    assert row["percentile"] >= 0.999 and row["n_obs"] == 15
     assert row["value"] == pytest.approx(1.0)
     ev = row["evidence"]
     assert ev["oecd"] == "3.1.6" and ev["coverage"] == 1.0
-    assert ev["turns"] == ev["max_turns"] == 27 and ev["draws"] == PERMUTATIONS
+    assert ev["turns"] == ev["max_turns"] == 27 and ev["draws"] == ROTATION_PERMUTATIONS
     assert ev["buyers"][0]["buyer_id"] == rot["buyer"]
 
     evidence = build_evidence(db, run_id, cluster["cluster_id"])
     assert evidence["basis"] == "bzp_winners"
     assert evidence["n_lots"] == 15 and evidence["n_buyers"] == 1
     assert evidence["oecd"]["3.1.6"]["test"] == TEST_ROTATION
-    assert evidence["oecd"]["3.1.6"]["pct"] >= 0.99
+    assert evidence["oecd"]["3.1.6"]["pct"] >= 0.999
+    # The near-constant spread of the rotating lots is the second, independent support.
+    assert evidence["oecd"]["3.3.7"]["pct"] >= 0.9
     assert {m["bidder_id"] for m in evidence["members"]} == set(members)
     assert len(evidence["lots"]) == 15
     assert all(lot["winner"] in ("A", "B", "C") for lot in evidence["lots"])
@@ -196,7 +231,31 @@ def test_rotating_buyer_is_detected(db, monkeypatch):
                         (cluster["cluster_id"],)).fetchone()
     assert signal["status"] == "review"
     assert signal["evidence"]["decision"]["gate"] == GATE_SINGLE_BUYER
+    assert signal["evidence"]["decision"]["gate_detail"].startswith("rotation+")
+    assert "spread" in signal["evidence"]["decision"]["gate_detail"]
     assert db.execute("select * from api.signals").fetchall() == []
+
+
+def test_rotation_without_second_support_is_weak_only(db, monkeypatch):
+    """Perfect rotation, but no spread data (2 offers) and winning prices well below the
+    estimate: no second support, so the gate is `weak_only`."""
+    monkeypatch.setenv("ENGINE_MAX_STATUS", "published")
+    make_market(db, seed=5, n_firms=12, n_lots=60, cpv=CPV, province_code="PL22")
+    rot = _rotating_buyer(db, n_offers=2, price=60000)
+    run_id = _prepare(db)
+    compute_bzp_only(db, run_id)
+    cluster = db.execute(
+        "select cluster_id from clusters where run_id = %s and members = %s::bigint[]",
+        (run_id, sorted(rot["firms"]))).fetchone()
+    evidence = build_evidence(db, run_id, cluster["cluster_id"])
+    assert evidence["oecd"]["3.1.6"]["pct"] >= 0.999
+    assert "3.3.7" not in evidence["oecd"]
+    upsert_signals(db, run_id, HighJev(), max_status="published")
+    signal = db.execute("select status, evidence from signals where signal_id = %s",
+                        (cluster["cluster_id"],)).fetchone()
+    assert signal["status"] == "review"
+    assert signal["evidence"]["decision"]["gate"] == GATE_WEAK_ONLY
+    assert signal["evidence"]["decision"]["gate_detail"] == "rotation_without_second_support"
 
 
 def test_honest_market_has_no_rotation(db):
@@ -260,6 +319,7 @@ def test_shared_account_between_two_winners(db, monkeypatch):
                         (cluster["cluster_id"],)).fetchone()
     assert signal["status"] == "review"
     assert signal["evidence"]["decision"]["gate"] == GATE_OK
+    assert "shared_winners" in signal["evidence"]["decision"]["gate_detail"]
 
 
 PERF_CPVS = ", ".join(f"'{c}'" for c in (
