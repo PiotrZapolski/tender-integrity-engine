@@ -108,7 +108,7 @@ MAX_SHARED_HOLDERS = 5
 MAX_EVIDENCE_ROWS = 20
 MAX_SEQUENCE = 24
 
-_POPCOUNT = np.array([bin(i).count("1") for i in range(1 << MAX_GROUP)], dtype=np.int64)
+_POPCOUNT = np.array([i.bit_count() for i in range(1 << MAX_GROUP)], dtype=np.int64)
 
 _LOTS_SQL = """
 select lm.market_id, l.id, p.buyer_id,
@@ -473,7 +473,7 @@ def spread_cluster_result(cluster_id: str, spreads: np.ndarray,
         return None
     median = float(np.median(x))
     cv = float(x.std(ddof=1) / x.mean()) if len(x) > 1 and x.mean() > 0 else 0.0
-    evidence = {"oecd": OECD_ITEM[TEST_SPREAD], "n_lots": int(len(x)),
+    evidence = {"oecd": OECD_ITEM[TEST_SPREAD], "n_lots": len(x),
                 "median": round(median, 6), "cv": round(cv, 6)}
     percentile = None
     if reference is not None and len(reference) >= MIN_OBS:
@@ -489,7 +489,7 @@ def spread_cluster_result(cluster_id: str, spreads: np.ndarray,
         evidence.update({"pct_narrow": round(p_narrow, 4), "pct_constant": round(p_const, 4),
                          "market_median": round(float(np.median(reference)), 6),
                          "draws": PERMUTATIONS})
-    return {"value": median, "percentile": percentile, "n_obs": int(len(x)),
+    return {"value": median, "percentile": percentile, "n_obs": len(x),
             "evidence": evidence}
 
 
