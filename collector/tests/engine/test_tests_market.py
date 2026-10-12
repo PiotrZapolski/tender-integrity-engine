@@ -23,10 +23,11 @@ def _assign(db, run_id, lot_ids, market_id=MARKET):
         " values (%s, '45233', '14', 'cpv5_prov', %s, %s)",
         (market_id, len(lot_ids), run_id),
     )
-    db.executemany(
-        "insert into lot_market(lot_id, market_id, run_id) values (%s, %s, %s)",
-        [(lot_id, market_id, run_id) for lot_id in lot_ids],
-    )
+    with db.cursor() as cur:
+        cur.executemany(
+            "insert into lot_market(lot_id, market_id, run_id) values (%s, %s, %s)",
+            [(lot_id, market_id, run_id) for lot_id in lot_ids],
+        )
     db.commit()
 
 
