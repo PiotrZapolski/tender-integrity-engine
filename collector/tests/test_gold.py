@@ -34,7 +34,7 @@ from tie.rawstore import RawStore
 
 RLU = get_decision("RLU-7/2023")
 SEED = ("RGD-10/2023", "RGD-11/2023", "RGD-12/2023", "RLU-7/2023")
-DASHES = re.compile("[- - ]")
+DASHES = re.compile("[" + chr(0x2013) + chr(0x2014) + "]")  # en and em dash
 
 
 class FakeProvider:
