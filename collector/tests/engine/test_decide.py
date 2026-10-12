@@ -584,7 +584,7 @@ def test_min_lots_and_min_buyers_boundaries():
     assert final_status(strong, _gate_evidence(strong.per_item, n_lots=40), 0.91, 0.6,
                         "review", 8) == ("review", GATE_OK)
     # The gate never raises a status.
-    low = _jev({"3.1.6": 0.1}, probability=0.1)
+    low = _jev({"3.1.6": 0.7}, probability=0.3)
     assert final_status(low, _gate_evidence(low.per_item, n_lots=40), 0.91, 0.6,
                         "published", 8) == ("hidden", GATE_OK)
 
