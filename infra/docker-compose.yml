@@ -1,0 +1,44 @@
+name: tie
+services:
+  db:
+    image: postgres:17
+    environment:
+      POSTGRES_USER: tie
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: tie
+    volumes: ["tie_pg:/var/lib/postgresql/data"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U tie"]
+      interval: 5s
+      retries: 20
+    restart: unless-stopped
+  migrate:
+    build: ../collector
+    image: tie-collector
+    env_file: .env
+    command: ["tie", "migrate"]
+    depends_on: { db: { condition: service_healthy } }
+  # Exactly one worker replica: budget and dedup logic assume a single worker.
+  worker:
+    build: ../collector
+    image: tie-collector
+    env_file: .env
+    command: ["tie", "worker"]
+    volumes: ["${RAW_HOST_DIR:-./data/raw}:/data/raw"]
+    depends_on: { migrate: { condition: service_completed_successfully } }
+    cpus: 4
+    mem_limit: 8g
+    restart: unless-stopped
+    # Let the current job finish on deploy instead of SIGKILL after Docker's default 10 s.
+    # An identity job runs up to 10 minutes before it queues a continuation.
+    stop_grace_period: 15m
+  cron:
+    build: ../collector
+    image: tie-collector
+    env_file: .env
+    command: ["supercronic", "/app/crontab"]
+    depends_on: { migrate: { condition: service_completed_successfully } }
+    restart: unless-stopped
+    stop_grace_period: 120s
+volumes:
+  tie_pg:

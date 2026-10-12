@@ -1,0 +1,41 @@
+name: ci
+on:
+  push:
+  pull_request:
+jobs:
+  collector:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: tie
+          POSTGRES_PASSWORD: tie
+          POSTGRES_DB: tie_test
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U tie" --health-interval 5s
+          --health-timeout 5s --health-retries 10
+    env:
+      TEST_DATABASE_URL: postgresql://tie:tie@localhost:5432/tie_test
+    defaults:
+      run:
+        working-directory: collector
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y poppler-utils tesseract-ocr tesseract-ocr-pol
+      - uses: astral-sh/setup-uv@v3
+      - run: uv venv && uv pip install -e ".[dev]"
+      - run: uv run ruff check src tests
+      - run: uv run pytest -q
+  image:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker build -t tie-collector collector
+      # Proves the SQL migration ships inside the non-editable wheel.
+      - run: >-
+          docker run --rm tie-collector python -c "from importlib import resources;
+          assert resources.files('tie.migrations').joinpath('001_init.sql').is_file();
+          import tie.config, tie.db, tie.jobs, tie.http"
+      - run: docker run --rm tie-collector tie --help
