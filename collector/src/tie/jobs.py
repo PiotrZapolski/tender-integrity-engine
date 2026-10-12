@@ -6,7 +6,7 @@ several workers can pull from the queue concurrently without taking the same job
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -112,6 +112,30 @@ def requeue_stale(conn: psycopg.Connection, older_than: timedelta) -> int:
         where status = 'running' and locked_at < now() - %s::interval
         """,
         (STALE_ERROR, older_than),
+    )
+    conn.commit()
+    return cur.rowcount
+
+
+def prioritize_provinces(conn: psycopg.Connection, provinces: Sequence[str]) -> int:
+    """Move queued document jobs of buyers from `provinces` ahead of the rest of the queue.
+
+    Sets `run_after` a day into the past, so the workers (which claim by `run_after`) take
+    these jobs first. Jobs already moved (`run_after` older than an hour) are not touched
+    again, so a repeated call only counts new jobs. Returns the number of jobs moved."""
+    if not provinces:
+        return 0
+    cur = conn.execute(
+        """
+        update jobs j set run_after = now() - interval '1 day'
+        from procedures p join buyers b on b.id = p.buyer_id
+        where j.status = 'queued'
+          and j.kind in ('ezam_docs','ezam_download','ezamawiajacy_docs','ezamawiajacy_download')
+          and j.run_after > now() - interval '1 hour'
+          and p.ocds_id = j.payload->>'ocds_id'
+          and b.province = any(%s)
+        """,
+        (list(provinces),),
     )
     conn.commit()
     return cur.rowcount

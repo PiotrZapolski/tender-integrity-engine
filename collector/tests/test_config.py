@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-from tie.config import engine_max_status, engine_min_lots, load_settings
+from tie.config import engine_max_status, engine_min_lots, load_settings, priority_provinces
 
 
 def test_defaults():
@@ -53,3 +53,11 @@ def test_engine_min_lots_defaults_to_8_and_validates():
         engine_min_lots({"ENGINE_MIN_LOTS": "many"})
     with pytest.raises(ValueError):
         engine_min_lots({"ENGINE_MIN_LOTS": "-1"})
+
+
+def test_priority_provinces_parses_codes():
+    assert load_settings({"DATABASE_URL": "x"}).priority_provinces == ()
+    assert priority_provinces({"PRIORITY_PROVINCES": ""}) == ()
+    assert priority_provinces({"PRIORITY_PROVINCES": " pl14, PL12 ,"}) == ("PL14", "PL12")
+    assert load_settings({"DATABASE_URL": "x", "PRIORITY_PROVINCES": "PL14"}
+                         ).priority_provinces == ("PL14",)

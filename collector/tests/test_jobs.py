@@ -1,6 +1,6 @@
 from datetime import UTC, datetime, timedelta
 
-from tie.jobs import claim, complete, enqueue, fail, requeue_stale
+from tie.jobs import claim, complete, enqueue, fail, prioritize_provinces, requeue_stale
 
 
 def test_enqueue_dedup(db):
@@ -73,3 +73,48 @@ def test_late_complete_after_requeue_is_noop(db):
     fail(db, j["id"], "late boom")
     row = db.execute("select status, last_error from jobs").fetchone()
     assert row["status"] == "queued" and row["last_error"] is None
+
+
+def _procedure_with_job(db, province, n, kind="ezam_docs"):
+    buyer_id = db.execute(
+        "insert into buyers(name, province) values (%s, %s) returning id",
+        (f"Buyer {province}", province),
+    ).fetchone()["id"]
+    ocds_id = f"ocds-148610-{n}"
+    db.execute(
+        "insert into procedures(ocds_id, bzp_number, notice_number, buyer_id, title, published_at)"
+        " values (%s, %s, %s, %s, 't', now())",
+        (ocds_id, f"bzp-{n}", f"notice-{n}", buyer_id),
+    )
+    db.commit()
+    later = datetime.now(UTC) + timedelta(minutes=30)
+    enqueue(db, kind, ocds_id, {"ocds_id": ocds_id}, run_after=later)
+    return ocds_id
+
+
+def _run_after_in_past(db, ocds_id):
+    row = db.execute("select run_after < now() as past from jobs where key = %s",
+                     (ocds_id,)).fetchone()
+    return row["past"]
+
+
+def test_prioritize_provinces_moves_only_listed_province(db):
+    pl14 = _procedure_with_job(db, "PL14", 1)
+    pl12 = _procedure_with_job(db, "PL12", 2)
+    assert prioritize_provinces(db, ["PL14"]) == 1
+    assert _run_after_in_past(db, pl14) is True
+    assert _run_after_in_past(db, pl12) is False
+    [claimed] = claim(db, ["ezam_docs"])
+    assert claimed["key"] == pl14
+
+
+def test_prioritize_provinces_empty_list_returns_zero(db):
+    ocds_id = _procedure_with_job(db, "PL14", 1)
+    assert prioritize_provinces(db, []) == 0
+    assert _run_after_in_past(db, ocds_id) is False
+
+
+def test_prioritize_provinces_skips_already_moved_jobs(db):
+    _procedure_with_job(db, "PL14", 1)
+    assert prioritize_provinces(db, ["PL14"]) == 1
+    assert prioritize_provinces(db, ["PL14"]) == 0
