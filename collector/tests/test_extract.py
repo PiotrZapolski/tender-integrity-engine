@@ -1,3 +1,5 @@
+import subprocess
+
 import pytest
 
 from tie.openings.extract import UnsupportedDocument, extract_text
@@ -29,3 +31,20 @@ def test_scan_uses_ocr(fixtures):
 def test_unsupported():
     with pytest.raises(UnsupportedDocument):
         extract_text(b"x", "a.xlsx")
+
+
+def test_ocr_renders_at_most_max_pages(monkeypatch):
+    from tie.openings import extract
+
+    calls = []
+
+    def fake_run(cmd, **kwargs):
+        calls.append(cmd)
+        return subprocess.CompletedProcess(cmd, 0, b"", b"")
+
+    monkeypatch.setattr(extract.subprocess, "run", fake_run)
+    assert extract.OCR_MAX_PAGES == 20
+    assert extract._ocr(b"%PDF-1.4") == ""
+    pdftoppm = calls[0]
+    assert pdftoppm[0] == "pdftoppm"
+    assert pdftoppm[pdftoppm.index("-l") + 1] == "20"
