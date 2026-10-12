@@ -1,3 +1,5 @@
+from importlib import resources
+
 from tie.db import migrate
 
 EXPECTED = {
@@ -15,6 +17,10 @@ def test_tables_exist(db):
 
 def test_migrate_is_idempotent(db):
     assert migrate(db) == []
+
+
+def test_migrations_are_package_resources():
+    assert resources.files("tie.migrations").joinpath("001_init.sql").is_file()
 
 
 def test_pg_trgm_enabled(db):
