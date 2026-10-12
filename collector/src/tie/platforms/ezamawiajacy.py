@@ -52,7 +52,7 @@ ROBOTS_TTL_S = 6 * 3600
 _DEMAND_PATH = re.compile(r"/pn/[^/]+/demand/\d+/notice/public/details/?")
 _NOTICE_PATH = re.compile(r"/pn/[^/]+/demand/notice/public/\d+/details/?")
 _ROW_ID = re.compile(r"^(\w*)_(\d+)$")
-_DATA_CALL = re.compile(r"""\$\("#([^"]+)"\)\.data\(\{(.*?)\}\)""", re.S)
+_DATA_CALL = re.compile(r"""\$\("#([^"]+)"\)\.data\(\{(.*?)\}\)""", re.DOTALL)
 _DATA_PAIR = re.compile(r"(\w+):\s*'([^']*)'")
 
 
