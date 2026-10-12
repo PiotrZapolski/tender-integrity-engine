@@ -166,6 +166,14 @@ def test_shared_data_pattern_uses_graph_and_own_alternatives():
     assert no_dashes(exp)
 
 
+def test_item_whose_test_says_no_signal_is_not_a_finding():
+    ev = rotation_evidence()
+    ev["oecd"]["3.3.10"] = {"level": "cluster", "value": -0.02, "pct": 0.99, "n": 1,
+                            "signal": False}
+    exp = template_explanation(ev, None)
+    assert [f["oecd"] for f in exp.findings] == ["3.1.6", "3.3.7"]
+
+
 def test_number_guard():
     allowed = allowed_numbers(rotation_evidence())
     assert numbers_ok("3 firmy od 2021 roku, 27 przetargów, wskaźnik 0,93, 98%.", allowed)

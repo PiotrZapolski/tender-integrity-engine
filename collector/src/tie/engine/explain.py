@@ -254,6 +254,7 @@ class _Member:
 class _Result:
     value: float | None
     percentile: float | None
+    signal: bool | None = None  # test verdict when the test stores one (3.3.10)
 
 
 @dataclass
@@ -283,7 +284,9 @@ def _members(evidence: Evidence) -> list[_Member]:
 
 def _best_result(raw: Any) -> _Result | None:
     if isinstance(raw, dict):
-        return _Result(_num(raw.get("value")), _num(_first(raw, "percentile", "pct")))
+        signal = raw.get("signal")
+        return _Result(_num(raw.get("value")), _num(_first(raw, "percentile", "pct")),
+                       signal if isinstance(signal, bool) else None)
     if isinstance(raw, list):
         results = [r for r in (_best_result(x) for x in raw) if r is not None]
         if not results:
@@ -511,6 +514,8 @@ def _selected_items(items: dict[str, _Result], per_item: dict[str, float]) -> li
         if p is not None:
             return p >= 0.5
         r = items[item]
+        if r.signal is False:
+            return False
         if r.percentile is not None:
             return r.percentile >= 0.9
         return item in ("3.2.11", "3.2.4", "3.1.7") and (r.value or 0) >= 1
