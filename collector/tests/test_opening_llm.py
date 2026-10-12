@@ -103,8 +103,42 @@ def test_extract_with_llm_validates_and_cleans_nip():
 
 def test_system_prompt_exact():
     assert SYSTEM_PROMPT.startswith("Jesteś parserem dokumentów \"informacja z otwarcia ofert\"")
-    assert SYSTEM_PROMPT.endswith("nie zgaduj NIP.")
-    assert len(SYSTEM_PROMPT.splitlines()) == 7
+    assert "nie zgaduj NIP." in SYSTEM_PROMPT
+    for phrase in ("Część nr 2", "Dla Części 3", "Zadanie nr 4", "Część II", "lot_no",
+                   "sprostowani", "łącznie"):
+        assert phrase in SYSTEM_PROMPT, phrase
+    assert " - " not in SYSTEM_PROMPT and "-" not in SYSTEM_PROMPT
+
+
+def test_slice_keeps_lot_header_above_first_marker():
+    # Real layout (documents 9, 105): the part header is the line right above "Wykonawca".
+    t = ("Zamawiający informuje\n\n❖Dla Części 1: Szkolenia dla nauczycieli\nWykonawca\n"
+         "Lp.  Nazwa i Adres Wykonawcy  Cena\n1.  Alfa  39 000,00 zł")
+    assert slice_offers_text(t).startswith("❖Dla Części 1: Szkolenia")
+    t2 = ("Wstęp\nDo upływu terminu dla Części 2-\n"
+          "Elektronicznej wagi ofertę złożył następujący\nwykonawca:\n1  Sklep  1 672,00")
+    assert slice_offers_text(t2).startswith("Do upływu terminu dla Części 2-")
+
+
+def test_slice_does_not_reach_far_back_for_headers():
+    t = "Część 1 opis\na\nb\nc\nd\nWykonawca Cena\n1 Alfa 10,00"
+    assert slice_offers_text(t).startswith("Wykonawca Cena")
+
+
+def test_slice_squeezes_layout_spacing():
+    t = "Wykonawca" + " " * 40 + "Cena\n\n\n\n1.   Alfa" + " " * 30 + "39 000,00 zł   "
+    assert slice_offers_text(t) == "Wykonawca  Cena\n\n1.  Alfa  39 000,00 zł"
+
+
+def test_llm_text_budget_scales_with_lots():
+    text = "Oferent\n" + "x" * 40000
+    for n_lots, expected in ((1, 6000), (2, 12000), (3, 18000), (4, 24000), (12, 24000)):
+        fake = FakeProvider({"budget": None, "offers": []})
+        extract_with_llm(fake, text, n_lots=n_lots)
+        assert len(fake.last["user"]) == expected, n_lots
+    fake = FakeProvider({"budget": None, "offers": []})
+    extract_with_llm(fake, text)
+    assert len(fake.last["user"]) == 6000
 
 
 def test_spytkowo_llm_path(db, fixtures, tmp_path):
@@ -214,28 +248,124 @@ def test_multilot_groups_by_lot(db, fixtures, tmp_path):
     assert name == "Zeta Sp. z o.o."
 
 
-def test_multilot_all_or_nothing(db, fixtures, tmp_path):
+def lot_bid_counts(db):
+    return {r["lot_no"]: r["n"] for r in db.execute(
+        "select l.lot_no, count(*) n from bids b join lots l on l.id = b.lot_id"
+        " group by 1 order by 1")}
+
+
+def test_multilot_partial_acceptance(db, fixtures, tmp_path):
+    # Lot 1 passes the cross-check, lot 2 does not: lot 1 is stored, lot 2 stays without bids.
     rs, doc_id = setup_doc(db, fixtures, tmp_path, "result_spytkowo.json",
                            "spytkowo_unit_prices.pdf", SPY_OCDS)
     add_lot2(db)
     fake = FakeProvider({"budget": None, "offers": spy_offers(1) + [
         {"offer_no": 1, "lot_no": 2, "bidder_name": "Zeta Sp. z o.o.", "nip": None,
          "price": 100.0, "price_basis": "total"}]})
+    assert process_opening_document(db, rs, fake, doc_id) == "parsed"
+    assert lot_bid_counts(db) == {1: 8}
+    doc = doc_row(db, doc_id)
+    assert doc["status"] == "parsed"
+    assert doc["error"].startswith("partial: ") and "lot2:count" in doc["error"]
+    assert "lot1:" not in doc["error"]
+
+
+def test_multilot_partial_drops_earlier_bids_of_failing_lot(db, fixtures, tmp_path):
+    rs, doc_id = setup_doc(db, fixtures, tmp_path, "result_spytkowo.json",
+                           "spytkowo_unit_prices.pdf", SPY_OCDS)
+    add_lot2(db)
+    lot2 = [{"offer_no": 1, "lot_no": 2, "bidder_name": "Zeta Sp. z o.o.",
+             "nip": "526-025-02-74", "price": 100.0, "price_basis": "total"},
+            {"offer_no": 2, "lot_no": 2, "bidder_name": "Omega", "nip": None, "price": 200.0,
+             "price_basis": "total"}]
+    good = FakeProvider({"budget": None, "offers": spy_offers(1) + lot2})
+    assert process_opening_document(db, rs, good, doc_id) == "parsed"
+    assert lot_bid_counts(db) == {1: 8, 2: 2}
+    worse = FakeProvider({"budget": None, "offers": spy_offers(1) + lot2[:1]})
+    assert process_opening_document(db, rs, worse, doc_id) == "parsed"
+    assert lot_bid_counts(db) == {1: 8}
+
+
+def test_multilot_every_lot_failing_is_mismatch(db, fixtures, tmp_path):
+    rs, doc_id = setup_doc(db, fixtures, tmp_path, "result_spytkowo.json",
+                           "spytkowo_unit_prices.pdf", SPY_OCDS)
+    add_lot2(db)
+    fake = FakeProvider({"budget": None, "offers": spy_offers(1)[:7] + [
+        {"offer_no": 1, "lot_no": 2, "bidder_name": "Zeta Sp. z o.o.", "nip": None,
+         "price": 100.0, "price_basis": "total"}]})
     assert process_opening_document(db, rs, fake, doc_id) == "mismatch"
     assert db.execute("select count(*) c from bids").fetchone()["c"] == 0
-    assert "lot2:count" in doc_row(db, doc_id)["error"]
+    err = doc_row(db, doc_id)["error"]
+    assert "lot1:count" in err and "lot2:count" in err and not err.startswith("partial")
 
 
-def test_unknown_lot_is_mismatch(db, fixtures, tmp_path):
+def test_unknown_lot_reported_other_lots_kept(db, fixtures, tmp_path):
     rs, doc_id = setup_doc(db, fixtures, tmp_path, "result_spytkowo.json",
                            "spytkowo_unit_prices.pdf", SPY_OCDS)
     add_lot2(db)
     fake = FakeProvider({"budget": None, "offers": spy_offers(1) + [
         {"offer_no": 1, "lot_no": 7, "bidder_name": "Zeta Sp. z o.o.", "nip": None,
          "price": 100.0, "price_basis": "total"}]})
-    assert process_opening_document(db, rs, fake, doc_id) == "mismatch"
-    assert "lot7:unknown" in doc_row(db, doc_id)["error"]
-    assert db.execute("select count(*) c from bids").fetchone()["c"] == 0
+    assert process_opening_document(db, rs, fake, doc_id) == "parsed"
+    err = doc_row(db, doc_id)["error"]
+    assert err.startswith("partial: ") and "lot7:unknown" in err and "lot2:count" in err
+    assert lot_bid_counts(db) == {1: 8}
+
+
+def test_lot_numbers_shifted_in_document(db, fixtures, tmp_path):
+    # Real case (document 30): the document numbers the parts "Zadanie nr 2..5" (continuing
+    # an earlier procedure) while BZP has lots 1..4.
+    rs, doc_id = setup_doc(db, fixtures, tmp_path, "result_spytkowo.json",
+                           "spytkowo_unit_prices.pdf", SPY_OCDS)
+    zeta = add_lot2(db)
+    fake = FakeProvider({"budget": None, "offers": spy_offers(2) + [
+        {"offer_no": 1, "lot_no": 3, "bidder_name": "Zeta Sp. z o.o.", "nip": "526-025-02-74",
+         "price": 100.0, "price_basis": "total"},
+        {"offer_no": 2, "lot_no": 3, "bidder_name": "Omega", "nip": None, "price": 200.0,
+         "price_basis": "total"}]})
+    assert process_opening_document(db, rs, fake, doc_id) == "parsed"
+    assert lot_bid_counts(db) == {1: 8, 2: 2}
+    winner = db.execute(
+        "select b.bidder_id from bids b join lots l on l.id = b.lot_id"
+        " where l.lot_no = 2 and b.is_winner").fetchone()
+    assert winner["bidder_id"] == zeta
+    assert doc_row(db, doc_id)["error"] == "notes: lot_offset:1"
+
+
+def test_bzp_partial_lot_parsed_deterministically(db, fixtures, tmp_path):
+    # BZP without the highest price but with the count and the winner (price and NIP).
+    rec = json.loads((fixtures / "bzp" / "result_kolbudy.json").read_text("utf-8"))
+    upsert_notice(db, parse_result_notice(rec), "sha")
+    db.execute("update lots set n_offers = 2, price_min = 213192.00, price_max = null,"
+               " price_winner = 213192.00")
+    db.commit()
+    rs = RawStore(tmp_path)
+    data = docx_bytes([
+        "INFORMACJA Z OTWARCIA OFERT",
+        "1. Alfa Sp. z o.o., NIP 593-233-53-16, cena 213 192,00 zl",
+        "2. Beta Sp. j., NIP 526-025-02-74, cena 250 000,00 zl",
+    ])
+    doc_id = insert_doc(db, rs, data, "otwarcie.docx", KOL_OCDS)
+    fake = FakeProvider({"budget": None, "offers": []})
+    assert process_opening_document(db, rs, fake, doc_id) == "parsed"
+    assert fake.calls == 0
+    doc = doc_row(db, doc_id)
+    assert doc["error"] == "notes: bzp_partial"
+    bids = db.execute("select * from bids order by offer_no").fetchall()
+    assert [b["is_winner"] for b in bids] == [True, False]
+
+
+def test_bzp_without_winner_price_still_needs_review(db, fixtures, tmp_path):
+    rec = json.loads((fixtures / "bzp" / "result_kolbudy.json").read_text("utf-8"))
+    upsert_notice(db, parse_result_notice(rec), "sha")
+    db.execute("update lots set n_offers = 2, price_min = null, price_max = 250000.00,"
+               " price_winner = null")
+    db.commit()
+    rs = RawStore(tmp_path)
+    doc_id = insert_doc(db, rs, docx_bytes(["INFORMACJA Z OTWARCIA OFERT"]), "o.docx", KOL_OCDS)
+    fake = FakeProvider({"budget": None, "offers": []})
+    assert process_opening_document(db, rs, fake, doc_id) == "needs_review"
+    assert doc_row(db, doc_id)["error"] == "bzp_incomplete"
 
 
 def test_invalid_llm_output_needs_review(db, fixtures, tmp_path):
