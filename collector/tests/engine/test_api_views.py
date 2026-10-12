@@ -327,7 +327,7 @@ def test_buyers_and_search(db, world):
         " where l.id = any(%s)", (world["cartel_lots"],))}
     for bid, b in buyers.items():
         assert b["province"] == "pomorskie"
-        assert b["single_offer_share"] == Decimal("0")
+        assert b["single_offer_share"] == Decimal(0)
         assert b["signal_ids"] == ([CLUSTER_ID] if int(bid) in cartel_buyers else [])
     assert sum(b["n_procedures"] for b in buyers.values()) == 80
 
@@ -349,7 +349,7 @@ def test_stats_and_oecd_catalog(db, world):
     n_bids = db.execute("select count(*) c from bids").fetchone()["c"]
     assert (s["procedures"], s["lots"], s["bids"], s["bidders"]) == (80, 80, n_bids, 12)
     assert s["signals_published"] == 1
-    assert s["parse_ok_share"] == Decimal("1")
+    assert s["parse_ok_share"] == Decimal(1)
     assert (s["oecd_checked"], s["oecd_partial"]) == (14, 12)
     assert s["updated_at"] is not None
 
