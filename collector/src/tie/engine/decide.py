@@ -162,7 +162,7 @@ def decide_cluster(decider: Decider, evidence: dict) -> Decision:
         return Decision(probability=0.0, strength=1.0, per_item={}, source=SOURCE_EMPTY)
     answers = decider.decide(task=TASK, state=evidence, questions=questions)
     if not isinstance(answers, dict):
-        raise ValueError("jev answers is not an object")
+        raise TypeError("jev answers is not an object")
     per_item = {
         item: round(_noul(answers, question_key(item)), 4)
         for item in evidence["oecd"] if item in CHECKED
@@ -243,7 +243,7 @@ def _upsert(conn: psycopg.Connection, run_id: int, cluster: dict, evidence: dict
         "  evidence_hash = excluded.evidence_hash, evidence = excluded.evidence,"
         "  updated_at = now()",
         (cluster["cluster_id"], run_id, cluster["cluster_id"], cluster["market_id"],
-         decision.probability, int(round(_clip(decision.strength, 1.0, 5.0))),
+         decision.probability, round(_clip(decision.strength, 1.0, 5.0)),
          Jsonb(decision.per_item), status, ehash, Jsonb(stored)),
     )
 
@@ -290,7 +290,7 @@ def upsert_signals(conn: psycopg.Connection, run_id: int, decider: Decider | Non
                 log.warning("jev error for cluster %s: HTTP %s", cluster["cluster_id"],
                             e.status)
                 jev_off = e.status in AUTH_STATUSES
-            except Exception as e:  # any other provider failure or bad answer: fallback
+            except Exception as e:  # noqa: BLE001 - other provider failure or bad answer
                 log.warning("jev decision failed for cluster %s: %s", cluster["cluster_id"],
                             type(e).__name__)
         if decision is None:
