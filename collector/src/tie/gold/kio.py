@@ -409,14 +409,15 @@ def match_procedure(conn: psycopg.Connection, ext: KioExtraction,
     if not (ext.buyer and ext.subject):
         return None
     row = conn.execute(
-        "select p.ocds_id, similarity(lower(b.name), lower(%(buyer)s)) as bs,"
-        " similarity(lower(p.title), lower(%(subject)s)) as ts"
+        "select ocds_id, bs, ts from ("
+        " select p.ocds_id, p.published_at,"
+        "  similarity(lower(b.name), lower(%(buyer)s)) as bs,"
+        "  similarity(lower(p.title), lower(%(subject)s)) as ts"
         " from procedures p join buyers b on b.id = p.buyer_id"
-        " where similarity(lower(b.name), lower(%(buyer)s)) >= %(min_b)s"
-        "  and similarity(lower(p.title), lower(%(subject)s)) >= %(min_t)s"
-        "  and (%(day)s::date is null or p.published_at between"
-        "       %(day)s::date - %(before)s::int and %(day)s::date + %(after)s::int)"
-        " order by bs + ts desc, p.published_at limit 1",
+        " where %(day)s::date is null or p.published_at between"
+        "  %(day)s::date - %(before)s::int and %(day)s::date + %(after)s::int"
+        ") c where bs >= %(min_b)s and ts >= %(min_t)s"
+        " order by bs + ts desc, published_at limit 1",
         {"buyer": ext.buyer, "subject": ext.subject, "min_b": MIN_BUYER_SIM,
          "min_t": MIN_SUBJECT_SIM, "day": ruling_date, "before": WINDOW_BEFORE_DAYS,
          "after": WINDOW_AFTER_DAYS}).fetchone()
