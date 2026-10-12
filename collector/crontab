@@ -1,0 +1,3 @@
+# Server time is UTC; 23:00 UTC = 01:00 in Poland during summer time.
+0 23 * * * tie daily
+*/30 * * * * tie stats
