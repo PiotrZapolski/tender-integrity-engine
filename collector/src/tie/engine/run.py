@@ -26,7 +26,7 @@ from typing import Any
 import psycopg
 from psycopg.types.json import Jsonb
 
-from tie.config import engine_max_status
+from tie.config import engine_max_status, engine_min_lots
 from tie.engine.decide import upsert_signals
 from tie.engine.explain import explain_signal
 from tie.engine.graph import build_pairs, find_clusters
@@ -91,7 +91,8 @@ def prune(conn: psycopg.Connection, keep: int = KEEP_DONE_RUNS) -> dict[str, int
     return deleted
 
 
-def _start(conn: psycopg.Connection, as_of: date, full: bool, max_status: str) -> int:
+def _start(conn: psycopg.Connection, as_of: date, full: bool, max_status: str,
+           min_lots: int) -> int:
     conn.execute(
         "update engine_runs set status = 'failed', finished_at = now(),"
         " params = params || jsonb_build_object('error', 'abandoned: still running after '"
@@ -102,7 +103,7 @@ def _start(conn: psycopg.Connection, as_of: date, full: bool, max_status: str) -
     run_id = conn.execute(
         "insert into engine_runs(as_of, params, status) values (%s, %s, 'running')"
         " returning run_id",
-        (as_of, Jsonb({"full": full, "max_status": max_status})),
+        (as_of, Jsonb({"full": full, "max_status": max_status, "min_lots": min_lots})),
     ).fetchone()["run_id"]
     conn.commit()
     return run_id
@@ -156,15 +157,18 @@ def run_engine(ctx, as_of: date, *, full: bool = False) -> dict:
     settings = getattr(ctx, "settings", None)
     max_status = (settings.engine_max_status if settings is not None
                   else engine_max_status())
+    min_lots = getattr(settings, "engine_min_lots", None)
+    if min_lots is None:
+        min_lots = engine_min_lots()
     got = conn.execute("select pg_try_advisory_lock(%s) ok",
                        (ENGINE_LOCK_KEY,)).fetchone()["ok"]
     conn.commit()
     if not got:
         raise EngineBusy("another engine run is in progress")
     try:
-        run_id = _start(conn, as_of, full, max_status)
-        log.info("engine run %s: as_of=%s full=%s max_status=%s", run_id, as_of, full,
-                 max_status)
+        run_id = _start(conn, as_of, full, max_status, min_lots)
+        log.info("engine run %s: as_of=%s full=%s max_status=%s min_lots=%s", run_id, as_of,
+                 full, max_status, min_lots)
         steps = [
             ("catalog", lambda: seed_catalog(conn)),
             ("markets", lambda: assign_markets(conn, run_id, as_of)),
@@ -175,7 +179,7 @@ def run_engine(ctx, as_of: date, *, full: bool = False) -> dict:
             ("pair_tests", lambda: compute_pair_tests(conn, run_id)),
             ("market_tests", lambda: compute_market_tests(conn, run_id)),
             ("signals", lambda: upsert_signals(conn, run_id, ctx.decider,
-                                               max_status=max_status)),
+                                               max_status=max_status, min_lots=min_lots)),
             ("explanations", lambda: _explain_published(conn, ctx.text_provider)),
         ]
         counts: dict[str, Any] = {}

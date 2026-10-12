@@ -12,6 +12,16 @@ z `p >= publish_threshold`, najsilniejszego punktu z `p_i >= 0.8` i co najmniej 
 z `p_i >= 0.6`. Ponad to status nigdy nie przekracza `ENGINE_MAX_STATUS` (domyślnie `review`,
 więc bez jawnej zgody operatora nic nie jest publikowane).
 
+Bramka minimalnych dowodów (`evidence_gate`, po progach i bramce publikacji, tylko obniża
+status): klaster z mniej niż `ENGINE_MIN_LOTS` (domyślnie 8) wspólnymi częściami albo
+z częściami u mniej niż 2 różnych zamawiających jest co najwyżej `hidden`; klaster bez
+żadnego "mocnego" punktu (`STRONG_ITEMS`: 3.1.6, 3.3.6, 3.2.11, 3.1.2, 3.3.10, 3.3.5), który
+zadziałał (obecny w dowodach, bez flagi `signal = false`, `p_i >= 0.6`), jest co najwyżej
+`review`. Punkty 3.1.1, 3.3.3, 3.3.9, 3.1.5, 3.3.7 (`WEAK_ITEMS`) same w sobie są "słabe"
+(często wygrywa, małe obniżki, cena ponad szacunek, nigdy nie wygrywa, luka cenowa): nie
+wystarczą do publikacji, nawet gdy `ENGINE_MAX_STATUS` na nią pozwala. Wynik bramki trafia
+do `signals.evidence.decision.gate` (`ok`, `min_lots`, `min_buyers`, `weak_only`).
+
 Błędy Jev: odpowiedź 4xx inna niż 429 (zły klucz, zły kształt zapytania, zła nazwa modelu)
 wyłącza Jev do końca przebiegu, tak samo przekroczony budżet i kilka kolejnych błędów innego
 rodzaju; reszta klastrów idzie regresją zapasową, a powód trafia do
@@ -19,7 +29,7 @@ rodzaju; reszta klastrów idzie regresją zapasową, a powód trafia do
 
 Wiersz `signals`: `signal_id` = `cluster_id`, `oecd` = mapa punkt -> prawdopodobieństwo
 (dla Jev noul, dla regresji wejście testu 0..1), `evidence` = pakiet dowodów z dodatkowym
-kluczem `decision` (`source`, `strength`), który nie wchodzi do `evidence_hash`.
+kluczem `decision` (`source`, `strength`, `gate`), który nie wchodzi do `evidence_hash`.
 """
 
 from __future__ import annotations
@@ -33,7 +43,7 @@ import psycopg
 from psycopg.types.json import Jsonb
 
 from tie.ai.providers import BudgetExceeded, ProviderHttpError
-from tie.config import ENGINE_STATUSES, engine_max_status
+from tie.config import ENGINE_STATUSES, engine_max_status, engine_min_lots
 from tie.engine.evidence import CHECKED, build_evidence, evidence_hash, present_items
 from tie.engine.oecd import CATALOG
 
@@ -57,6 +67,18 @@ TOP_ITEMS = 3
 PUBLISH_MAX_ITEM = 0.8
 PUBLISH_ITEM_FLOOR = 0.6
 PUBLISH_MIN_ITEMS = 2
+# Bramka minimalnych dowodów: punkty "mocne" (wzór zachowania grupy firm) i "słabe" (cecha
+# pojedynczej firmy albo części, częsta też bez zmowy). Bez mocnego punktu co najwyżej review.
+STRONG_ITEMS = frozenset({"3.1.6", "3.3.6", "3.2.11", "3.1.2", "3.3.10", "3.3.5"})
+WEAK_ITEMS = frozenset({"3.1.1", "3.3.3", "3.3.9", "3.1.5", "3.3.7"})
+# Mocny punkt "zadziałał", gdy jego prawdopodobieństwo jest co najmniej takie.
+STRONG_ITEM_FLOOR = PUBLISH_ITEM_FLOOR
+# Części klastra muszą pochodzić od co najmniej tylu różnych zamawiających.
+MIN_BUYERS = 2
+GATE_OK = "ok"
+GATE_MIN_LOTS = "min_lots"
+GATE_MIN_BUYERS = "min_buyers"
+GATE_WEAK_ONLY = "weak_only"
 # Regresja zapasowa: stałe wagi na wejściach testów (percentyl 0..1), wyraz wolny.
 FALLBACK_WEIGHTS = {
     "3.1.6": 2.0,
@@ -266,6 +288,37 @@ def status_for(decision: Decision, publish_threshold: float, review_threshold: f
     return cap_status(status, max_status)
 
 
+def strong_items_fired(decision: Decision, evidence: dict) -> list[str]:
+    """Mocne punkty, które zadziałały: obecne w dowodach (`present_items`), bez flagi
+    `signal = false` i z prawdopodobieństwem decyzji co najmniej `STRONG_ITEM_FLOOR`."""
+    present = present_items(evidence)
+    return sorted(
+        item for item in STRONG_ITEMS
+        if item in present and present[item].get("signal") is not False
+        and decision.per_item.get(item, 0.0) >= STRONG_ITEM_FLOOR
+    )
+
+
+def evidence_gate(decision: Decision, evidence: dict, min_lots: int) -> tuple[str, str]:
+    """(wynik bramki, najwyższy dozwolony status) dla minimalnych dowodów klastra."""
+    if int(evidence.get("n_lots") or 0) < min_lots:
+        return GATE_MIN_LOTS, "hidden"
+    if int(evidence.get("n_buyers") or 0) < MIN_BUYERS:
+        return GATE_MIN_BUYERS, "hidden"
+    if not strong_items_fired(decision, evidence):
+        return GATE_WEAK_ONLY, "review"
+    return GATE_OK, "published"
+
+
+def final_status(decision: Decision, evidence: dict, publish_threshold: float,
+                 review_threshold: float, max_status: str, min_lots: int) -> tuple[str, str]:
+    """(status, wynik bramki): progi i bramka publikacji (`status_for`), potem bramka
+    minimalnych dowodów, która status tylko obniża."""
+    status = status_for(decision, publish_threshold, review_threshold, max_status)
+    gate, highest = evidence_gate(decision, evidence, min_lots)
+    return cap_status(status, highest), gate
+
+
 def _stored_decision(row: dict) -> Decision | None:
     meta = (row.get("evidence") or {}).get("decision") or {}
     if meta.get("source") != SOURCE_JEV or row.get("probability") is None:
@@ -277,9 +330,10 @@ def _stored_decision(row: dict) -> Decision | None:
 
 
 def _upsert(conn: psycopg.Connection, run_id: int, cluster: dict, evidence: dict, ehash: str,
-            decision: Decision, status: str) -> None:
-    stored = {**evidence, "decision": {"source": decision.source,
-                                       "strength": decision.strength}}
+            decision: Decision, status: str, gate: str) -> None:
+    stored = {**evidence, "market_id": cluster["market_id"],
+              "decision": {"source": decision.source, "strength": decision.strength,
+                           "gate": gate}}
     conn.execute(
         "insert into signals(signal_id, run_id, cluster_id, market_id, probability, strength,"
         " oecd, status, evidence_hash, evidence)"
@@ -313,10 +367,12 @@ def _http_error_disables_jev(status: int) -> bool:
 
 def upsert_signals(conn: psycopg.Connection, run_id: int, decider: Decider | None, *,
                    publish_threshold: float = 0.91, review_threshold: float = 0.6,
-                   max_status: str | None = None) -> dict:
+                   max_status: str | None = None, min_lots: int | None = None) -> dict:
     """Sygnał dla każdego klastra przebiegu `run_id`; zwraca liczniki.
 
     `max_status` (domyślnie z `ENGINE_MAX_STATUS`, czyli `review`) ogranicza status z góry.
+    `min_lots` (domyślnie z `ENGINE_MIN_LOTS`, czyli 8) to próg bramki minimalnych dowodów;
+    liczby klastrów z wynikiem bramki innym niż `ok` są w `counts["gates"]` (tylko gdy > 0).
     Gdy `evidence_hash` sygnału się nie zmienił, a poprzednia decyzja pochodziła z Jev,
     model nie jest pytany ponownie. Bez decidera, po `BudgetExceeded` albo błędzie dostawcy
     decyduje regresja zapasowa, a status jest co najwyżej `review`. Każdy klaster jest
@@ -326,6 +382,9 @@ def upsert_signals(conn: psycopg.Connection, run_id: int, decider: Decider | Non
         max_status = engine_max_status()
     if max_status not in ENGINE_STATUSES:
         raise ValueError(f"unknown max status {max_status!r}")
+    if min_lots is None:
+        min_lots = engine_min_lots()
+    gates: dict[str, int] = {}
     counts: dict[str, Any] = {"clusters": 0, "published": 0, "review": 0, "hidden": 0,
                               "jev_calls": 0, "reused": 0, "fallback": 0}
     clusters = conn.execute(
@@ -386,11 +445,16 @@ def upsert_signals(conn: psycopg.Connection, run_id: int, decider: Decider | Non
         if decision is None:
             decision = fallback_decision(evidence)
             counts["fallback"] += 1
-        status = status_for(decision, publish_threshold, review_threshold, max_status)
-        _upsert(conn, run_id, cluster, evidence, ehash, decision, status)
+        status, gate = final_status(decision, evidence, publish_threshold, review_threshold,
+                                    max_status, min_lots)
+        _upsert(conn, run_id, cluster, evidence, ehash, decision, status, gate)
         conn.commit()
         counts["clusters"] += 1
         counts[status] += 1
+        if gate != GATE_OK:
+            gates[gate] = gates.get(gate, 0) + 1
+    if gates:
+        counts["gates"] = gates
     if decider is not None and counts["jev_calls"] == 0 and counts["fallback"] > 0:
         log.warning("engine run %s: a Jev decider is configured but made no decision"
                     " (%s fallback decisions)", run_id, counts["fallback"])
