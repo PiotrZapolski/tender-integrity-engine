@@ -137,6 +137,10 @@ def _stats(conn: psycopg.Connection) -> dict:
     excluded = conn.execute(
         "select count(*) n from bids where identity_failures >= %s",
         (MAX_IDENTITY_FAILURES,)).fetchone()["n"]
+    # Parsed documents with some lots rejected by the cross-check (see tie.openings.store).
+    partial = conn.execute(
+        "select count(*) n from documents where status = 'parsed' and error like %s",
+        ("partial:%",)).fetchone()["n"]
     conn.commit()
     return {
         "procedures": count("procedures"),
@@ -145,6 +149,7 @@ def _stats(conn: psycopg.Connection) -> dict:
         "bids_identity_excluded": excluded,
         "bidders": count("bidders"),
         "documents": documents,
+        "partial": partial,
         "mismatch_share": round(documents.get("mismatch", 0) / checked, 4) if checked else None,
         "jobs": jobs,
         "ai_cost_today_usd": float(cost),

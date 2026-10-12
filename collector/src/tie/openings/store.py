@@ -1,14 +1,22 @@
 """Processing of one downloaded opening-of-offers document into validated `bids`.
 
 Flow: raw bytes from the raw store, text extraction, the deterministic parser, and (when that
-gives nothing that passes the BZP cross-check) the LLM fallback. Offers are stored only when
-every checkable lot of the procedure passes `cross_check`; otherwise nothing is written and the
-document is marked `mismatch`. Correctness beats coverage.
+gives nothing that passes the BZP cross-check) the LLM fallback. Acceptance is per lot: the
+offers of a lot are stored only when that lot passes `cross_check`; lots that fail get no
+bids. Correctness beats coverage.
 
 Document statuses returned and stored in `documents.status`:
-- `parsed`: offers stored,
-- `mismatch`: offers found but rejected by the cross-check (`documents.error` = reasons),
+- `parsed`: offers of at least one lot stored. `documents.error` is NULL or records what is
+  worth knowing, in "; "-separated parts: `partial: <reasons>` (lots that failed, e.g.
+  "partial: lot3:prices,lot5:winner") and `notes: <notes>` (relaxed rules used by the
+  cross-check, e.g. "notes: bzp_partial,lot2:winner_by_price,lot_offset:1"),
+- `mismatch`: offers found but every lot rejected by the cross-check (`documents.error` =
+  reasons),
 - `needs_review`: nothing to check (unreadable file, invalid LLM answer, no BZP facts).
+
+When the document numbers its parts with a constant offset from BZP (e.g. "Zadanie nr 2..5"
+continuing an earlier procedure, BZP lots 1..4), the shifted numbering is tried as well and
+the one under which more lots pass is used (`lot_offset:<d>` note).
 
 `BudgetExceeded` and provider (HTTP) errors propagate so the job goes back to the queue; the
 transaction is rolled back and the document keeps its previous status.
@@ -19,23 +27,13 @@ from __future__ import annotations
 import logging
 from collections import Counter, defaultdict
 from dataclasses import dataclass
-from decimal import Decimal
 
 import psycopg
 from pydantic import ValidationError
 
 from tie.bzp.store import upsert_bidder
 from tie.money import clean_nip
-from tie.openings.crosscheck import (
-    NAME_SIMILARITY,
-    CheckResult,
-    LotFacts,
-    _jaccard,
-    _nip_digits,
-    _price_matches,
-    _tokens,
-    cross_check,
-)
+from tie.openings.crosscheck import CheckResult, LotFacts, cross_check
 from tie.openings.extract import extract_text
 from tie.openings.llm import TextProvider, extract_with_llm
 from tie.openings.parse import OfferRow, parse_opening
@@ -59,10 +57,12 @@ class _Lot:
 
     @property
     def checkable(self) -> bool:
-        """BZP has enough to verify offers: at least one offer and the min/max prices."""
+        """BZP has enough to verify offers: at least one offer and the min/max prices, or
+        (`bzp_partial`) the winner price."""
         f = self.facts
-        return (f.n_offers is not None and f.n_offers >= 1
-                and f.price_min is not None and f.price_max is not None)
+        prices = (f.price_min is not None and f.price_max is not None) or (
+            f.price_winner is not None)
+        return f.n_offers is not None and f.n_offers >= 1 and prices
 
 
 def _load_document(conn: psycopg.Connection, document_id: int) -> dict:
@@ -117,29 +117,6 @@ def _finish(conn: psycopg.Connection, document_id: int, status: str,
     return status
 
 
-def _winner_index(rows: list[OfferRow], facts: LotFacts, scale: Decimal) -> int | None:
-    """Index of the winner's offer, by the same rules as the cross-check winner test.
-
-    Several candidates: the one whose scaled price is closest to the BZP winner price.
-    """
-    winner_nip = _nip_digits(facts.winner_nip)
-    nips = [_nip_digits(r.nip) for r in rows]
-    if winner_nip and any(nips):
-        cands = [i for i, r in enumerate(rows)
-                 if nips[i] == winner_nip and _price_matches(r.price, scale, facts)]
-    else:
-        winner_tokens = _tokens(facts.winner_name_norm)
-        cands = [i for i, r in enumerate(rows)
-                 if winner_tokens
-                 and _jaccard(_tokens(r.bidder_name), winner_tokens) >= NAME_SIMILARITY
-                 and _price_matches(r.price, scale, facts)]
-    if not cands:
-        return None
-    if facts.price_winner is None:
-        return cands[0]
-    return min(cands, key=lambda i: abs(rows[i].price * scale - facts.price_winner))
-
-
 def _ranks(rows: list[OfferRow]) -> list[int | None]:
     """Competition ranking by price ascending (ties share a rank); no price, no rank."""
     prices = [r.price for r in rows if r.price is not None]
@@ -166,7 +143,7 @@ def _write_bids(conn: psycopg.Connection, document_id: int, lot: _Lot, rows: lis
     rejected, flagged in `outside_bzp_range`): cover bids are often rejected."""
     scale = result.scale
     outside = result.outside_range or [False] * len(rows)
-    winner = _winner_index(rows, lot.facts, scale)
+    winner = result.winner
     ranks = _ranks(rows)
     ids: list[int] = []
     for i, row in enumerate(rows):
@@ -176,7 +153,8 @@ def _write_bids(conn: psycopg.Connection, document_id: int, lot: _Lot, rows: lis
             bidder_id = _bidder_by_nip(conn, row.bidder_name, row.nip)
             confidence = 1.0 if bidder_id is not None else None
         elif i == winner:
-            # Winner confirmed by name and price against BZP: it is the BZP winner.
+            # Winner confirmed against BZP (name and price, or its unique price): it is the
+            # BZP winner.
             bidder_id = lot.winner_bidder_id
         out = conn.execute(
             "insert into bids(lot_id, document_id, offer_no, bidder_id, bidder_name_raw,"
@@ -227,23 +205,65 @@ def _duplicate_keys(rows: list[OfferRow]) -> bool:
     return any(n > 1 for n in keys.values())
 
 
-def _check_lots(groups: dict[int, list[OfferRow]], lots: list[_Lot]
-                ) -> tuple[list[tuple[_Lot, list[OfferRow], CheckResult]], list[str]]:
-    """Cross-check every checkable lot; returns (results, reasons). Ok when no reasons."""
+Checked = list[tuple[_Lot, list[OfferRow], CheckResult]]
+
+
+@dataclass
+class _LotsCheck:
+    passed: Checked  # lots whose offers passed the cross-check
+    reasons: list[str]  # why the other lots failed, plus lot numbers unknown to BZP
+    notes: list[str]  # relaxed rules used by the passed lots
+
+
+def _check_lots(groups: dict[int, list[OfferRow]], lots: list[_Lot]) -> _LotsCheck:
+    """Cross-check every checkable lot on its own. Reasons and notes get a `lot<N>:` prefix
+    when the procedure has several checkable lots or the document names unknown ones."""
     known = {lot.lot_no for lot in lots}
     targets = [lot for lot in lots if lot.checkable]
     prefixed = len(targets) > 1 or any(no not in known for no in groups)
-    reasons = [f"lot{no}:unknown" for no in sorted(groups) if no not in known]
-    checked = []
+    out = _LotsCheck(passed=[], reasons=[f"lot{no}:unknown" for no in sorted(groups)
+                                         if no not in known], notes=[])
     for lot in targets:
         rows = groups.get(lot.lot_no, [])
         result = cross_check(rows, lot.facts)
         lot_reasons = list(result.reasons)
         if result.ok and _duplicate_keys(rows):
             lot_reasons.append("duplicate_offer")
-        reasons.extend(f"lot{lot.lot_no}:{r}" if prefixed else r for r in lot_reasons)
-        checked.append((lot, rows, result))
-    return checked, reasons
+        if lot_reasons:
+            out.reasons.extend(f"lot{lot.lot_no}:{r}" if prefixed else r for r in lot_reasons)
+        else:
+            out.passed.append((lot, rows, result))
+            out.notes.extend(f"lot{lot.lot_no}:{n}" if prefixed else n for n in result.notes)
+    return out
+
+
+def _check_lots_best_numbering(groups: dict[int, list[OfferRow]],
+                               lots: list[_Lot]) -> _LotsCheck:
+    """`_check_lots` as numbered by the document, and with the document's lot numbers shifted
+    by a constant so that its lowest one is BZP's lowest (when all shifted numbers exist in
+    BZP); the numbering under which more lots pass wins, ties keep the document's."""
+    best = _check_lots(groups, lots)
+    known = {lot.lot_no for lot in lots}
+    if not groups or not known:
+        return best
+    offset = min(groups) - min(known)
+    shifted = {no - offset: rows for no, rows in groups.items()}
+    if offset == 0 or not set(shifted) <= known:
+        return best
+    alt = _check_lots(shifted, lots)
+    if len(alt.passed) <= len(best.passed):
+        return best
+    alt.notes.append(f"lot_offset:{offset}")
+    return alt
+
+
+def _parsed_error(check: _LotsCheck) -> str | None:
+    parts = []
+    if check.reasons:
+        parts.append("partial: " + ",".join(check.reasons))
+    if check.notes:
+        parts.append("notes: " + ",".join(check.notes))
+    return "; ".join(parts) or None
 
 
 def _llm_groups(llm_offers, lots: list[_Lot], buyer_nip: str | None
@@ -289,21 +309,21 @@ def _process(conn: psycopg.Connection, rawstore: RawStore, provider: TextProvide
     buyer_nip = clean_nip(doc["buyer_nip"]) if doc["buyer_nip"] else None
     parsed = parse_opening(extracted.text, buyer_nip=buyer_nip)
     if len(targets) == 1 and targets[0].facts.n_offers >= 2 and parsed.offers:
-        checked, reasons = _check_lots({targets[0].lot_no: list(parsed.offers)}, targets)
-        if not reasons:
-            _store(conn, document_id, checked, "deterministic")
-            return _finish(conn, document_id, PARSED)
+        check = _check_lots({targets[0].lot_no: list(parsed.offers)}, targets)
+        if check.passed and not check.reasons:
+            _store(conn, document_id, check.passed, "deterministic")
+            return _finish(conn, document_id, PARSED, _parsed_error(check))
 
     try:
-        llm = extract_with_llm(provider, extracted.text)
+        llm = extract_with_llm(provider, extracted.text, n_lots=len(lots))
     except ValidationError as e:
         return _finish(conn, document_id, NEEDS_REVIEW,
                        f"llm_invalid: {e.error_count()} errors")
-    checked, reasons = _check_lots(_llm_groups(llm.offers, lots, buyer_nip), lots)
-    if reasons:
-        return _finish(conn, document_id, MISMATCH, ",".join(reasons))
-    _store(conn, document_id, checked, "llm")
-    return _finish(conn, document_id, PARSED)
+    check = _check_lots_best_numbering(_llm_groups(llm.offers, lots, buyer_nip), lots)
+    if not check.passed:
+        return _finish(conn, document_id, MISMATCH, ",".join(check.reasons))
+    _store(conn, document_id, check.passed, "llm")
+    return _finish(conn, document_id, PARSED, _parsed_error(check))
 
 
 def process_opening_document(conn: psycopg.Connection, rawstore: RawStore,
