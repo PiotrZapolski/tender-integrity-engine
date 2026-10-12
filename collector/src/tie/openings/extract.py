@@ -47,6 +47,7 @@ def _pdftotext(data: bytes) -> str:
         proc = subprocess.run(
             ["pdftotext", "-layout", "-", "-"],
             input=data,
+            check=False,
             capture_output=True,
             timeout=PDFTOTEXT_TIMEOUT,
         )
