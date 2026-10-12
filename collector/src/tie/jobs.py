@@ -14,6 +14,7 @@ import psycopg
 from psycopg.types.json import Jsonb
 
 MAX_ERROR_LEN = 2000
+STALE_ERROR = "stale: worker lost"
 
 
 def enqueue(
@@ -54,43 +55,63 @@ def claim(conn: psycopg.Connection, kinds: Iterable[str], limit: int = 1) -> lis
 
 
 def complete(conn: psycopg.Connection, job_id: int) -> None:
-    conn.execute("update jobs set status = 'done', locked_at = null where id = %s", (job_id,))
+    """Mark a running job done. No-op if the job is not running (e.g. requeued as stale)."""
+    conn.execute(
+        "update jobs set status = 'done', locked_at = null where id = %s and status = 'running'",
+        (job_id,),
+    )
     conn.commit()
 
 
 def fail(
     conn: psycopg.Connection, job_id: int, error: str, *, now: datetime | None = None
 ) -> None:
-    """Record a failure: retry with exponential backoff, or mark failed when out of attempts."""
+    """Record a failure: retry with exponential backoff, or mark failed when out of attempts.
+
+    No-op if the job is not running; LookupError if the job does not exist.
+    """
     now = now or datetime.now(UTC)
     job = conn.execute(
-        "select attempts, max_attempts from jobs where id = %s", (job_id,)
+        "select attempts, max_attempts, status from jobs where id = %s for update", (job_id,)
     ).fetchone()
     if job is None:
         conn.rollback()
         raise LookupError(f"job {job_id} not found")
+    if job["status"] != "running":
+        conn.commit()
+        return
     error = error[:MAX_ERROR_LEN]
     if job["attempts"] >= job["max_attempts"]:
         conn.execute(
-            "update jobs set status = 'failed', locked_at = null, last_error = %s where id = %s",
+            "update jobs set status = 'failed', locked_at = null, last_error = %s"
+            " where id = %s and status = 'running'",
             (error, job_id),
         )
     else:
         run_after = now + timedelta(minutes=2 ** job["attempts"])
         conn.execute(
             "update jobs set status = 'queued', locked_at = null, last_error = %s,"
-            " run_after = %s where id = %s",
+            " run_after = %s where id = %s and status = 'running'",
             (error, run_after, job_id),
         )
     conn.commit()
 
 
 def requeue_stale(conn: psycopg.Connection, older_than: timedelta) -> int:
-    """Put running jobs whose lock is older than `older_than` back in the queue."""
+    """Handle running jobs whose lock is older than `older_than` (worker lost).
+
+    Jobs with attempts left go back to 'queued'; jobs out of attempts become 'failed'.
+    Returns the number of rows touched.
+    """
     cur = conn.execute(
-        "update jobs set status = 'queued', locked_at = null"
-        " where status = 'running' and locked_at < now() - %s::interval",
-        (older_than,),
+        """
+        update jobs set
+          status = case when attempts >= max_attempts then 'failed' else 'queued' end,
+          last_error = case when attempts >= max_attempts then %s else last_error end,
+          locked_at = null
+        where status = 'running' and locked_at < now() - %s::interval
+        """,
+        (STALE_ERROR, older_than),
     )
     conn.commit()
     return cur.rowcount

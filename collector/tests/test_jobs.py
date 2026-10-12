@@ -47,3 +47,29 @@ def test_requeue_stale(db):
     db.commit()
     assert requeue_stale(db, timedelta(hours=1)) == 1
     assert claim(db, ["k"]) != []
+
+
+def test_requeue_stale_out_of_attempts_fails(db):
+    enqueue(db, "k", "dead")
+    db.execute("update jobs set max_attempts=1")
+    db.commit()
+    claim(db, ["k"])
+    db.execute("update jobs set locked_at = now() - interval '2 hours'")
+    db.commit()
+    assert requeue_stale(db, timedelta(hours=1)) == 1
+    row = db.execute("select status, last_error from jobs").fetchone()
+    assert row["status"] == "failed" and row["last_error"] == "stale: worker lost"
+    assert claim(db, ["k"]) == []
+
+
+def test_late_complete_after_requeue_is_noop(db):
+    enqueue(db, "k", "late")
+    [j] = claim(db, ["k"])
+    db.execute("update jobs set locked_at = now() - interval '2 hours'")
+    db.commit()
+    assert requeue_stale(db, timedelta(hours=1)) == 1
+    complete(db, j["id"])
+    assert db.execute("select status from jobs").fetchone()["status"] == "queued"
+    fail(db, j["id"], "late boom")
+    row = db.execute("select status, last_error from jobs").fetchone()
+    assert row["status"] == "queued" and row["last_error"] is None
