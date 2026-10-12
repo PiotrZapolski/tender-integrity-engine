@@ -23,7 +23,7 @@ Production runs on one box under `/var/www/tie/`, as a Docker Compose project na
 ## Daily operation
 
 - `cron` (supercronic, `collector/crontab`) runs `tie daily` at 23:00 UTC (01:00 in Poland
-  during summer time), `tie engine-run` at 02:30 UTC and `tie stats` every 30 minutes.
+  during summer time), `tie engine-run` every hour at :17 UTC while the backfill runs (daily at 02:30 afterwards) and `tie stats` every 30 minutes.
 - Workers are split by job kind so one slow host never blocks the rest:
   - `worker-ezam`: `bzp_day`, `ezam_docs`, `ezam_download` (the only process talking to
     ezamowienia.gov.pl, so its 1 s gap holds). Keep one replica.
