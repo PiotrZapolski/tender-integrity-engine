@@ -1,8 +1,11 @@
 """Market and cluster tests of the OECD checklist.
 
 - 3.1.2 territorial split (level `cluster`): buyer x member matrix of the wins of the cluster
-  members in their market. Value = share of member wins that happened at buyers where only one
-  member ever wins (exclusivity index, buyers weighted by the number of lots). High = signal.
+  members in their market, counted only over contested lots (2 or more offers: a one-offer
+  lot is no allocation) and only at buyers with at least 2 such member-won lots (a buyer
+  with one lot is exclusive by definition). Value = share of those member wins that happened
+  at buyers where only one member ever wins (exclusivity index, buyers weighted by the
+  number of lots). High = signal.
   Percentile: the observed index against the same index after reshuffling the winner labels
   among the same member-won lots (buyers and win counts kept), so a cluster that simply works
   for few buyers does not look like a split. Written only when at least two members win and the
@@ -45,6 +48,8 @@ ENTRY_MIN_LOTS = 3
 ENTRY_SIGNAL_DROP = -0.10
 SPLIT_DRAWS = 999
 MAX_EVIDENCE_ROWS = 20
+SPLIT_MIN_OFFERS = 2
+SPLIT_MIN_BUYER_LOTS = 2
 
 
 @dataclass(frozen=True)
@@ -55,6 +60,7 @@ class _Lot:
     day: date
     winner: int | None
     ratio: float | None
+    n_offers: int | None = None
 
 
 def _add_months(d: date, months: int) -> date:
@@ -79,7 +85,7 @@ def _load(conn: psycopg.Connection, run_id: int):
     lots: dict[int, _Lot] = {}
     for r in conn.execute(
         "select lm.lot_id, lm.market_id, p.buyer_id, p.published_at::date as day,"
-        " l.winner_bidder_id, l.price_winner, l.estimated_value"
+        " l.winner_bidder_id, l.price_winner, l.estimated_value, l.n_offers"
         " from lot_market lm join lots l on l.id = lm.lot_id"
         " join procedures p on p.ocds_id = l.procedure_id"
         " where lm.run_id = %s",
@@ -89,7 +95,8 @@ def _load(conn: psycopg.Connection, run_id: int):
         if r["price_winner"] is not None and r["estimated_value"] and r["estimated_value"] > 0:
             ratio = float(r["price_winner"] / r["estimated_value"])
         lots[r["lot_id"]] = _Lot(
-            r["lot_id"], r["market_id"], r["buyer_id"], r["day"], r["winner_bidder_id"], ratio
+            r["lot_id"], r["market_id"], r["buyer_id"], r["day"], r["winner_bidder_id"], ratio,
+            r["n_offers"],
         )
 
     bidders: dict[int, set[int]] = defaultdict(set)
@@ -128,10 +135,21 @@ def _exclusivity(starts: np.ndarray, sizes: np.ndarray, labels: np.ndarray) -> n
     return ((lo == hi) * sizes).sum(axis=1) / sizes.sum()
 
 
-def _split_result(cluster, market_lots: list[_Lot], bidders) -> dict | None:
+def _contested(lot: _Lot, bidders) -> bool:
+    return max(lot.n_offers or 0, len(bidders.get(lot.lot_id, ()))) >= SPLIT_MIN_OFFERS
+
+
+def _split_result(cluster, member_lots: list[_Lot], bidders) -> dict | None:
+    """3.1.2 for one cluster; `member_lots` = lots of its market where a member takes part
+    (a bid or the win)."""
     members = sorted(cluster["members"] or [])
     member_set = set(members)
-    won = [lot for lot in market_lots if lot.winner in member_set and lot.buyer_id is not None]
+    won = [lot for lot in member_lots
+           if lot.winner in member_set and lot.buyer_id is not None and _contested(lot, bidders)]
+    per_buyer: dict[int, int] = defaultdict(int)
+    for lot in won:
+        per_buyer[lot.buyer_id] += 1
+    won = [lot for lot in won if per_buyer[lot.buyer_id] >= SPLIT_MIN_BUYER_LOTS]
     winners = sorted({lot.winner for lot in won})
     buyers = sorted({lot.buyer_id for lot in won})
     if len(winners) < 2 or len(buyers) < 2:
@@ -156,7 +174,7 @@ def _split_result(cluster, market_lots: list[_Lot], bidders) -> dict | None:
 
     # Starts: share of member bids placed at buyers where only one member ever bids.
     bids_at: dict[int, dict[int, int]] = defaultdict(lambda: defaultdict(int))
-    for lot in market_lots:
+    for lot in member_lots:
         if lot.buyer_id is None:
             continue
         for m in bidders.get(lot.lot_id, set()) & member_set:
@@ -287,19 +305,29 @@ def compute_market_tests(conn: psycopg.Connection, run_id: int) -> int:
     by_market: dict[str, list[_Lot]] = defaultdict(list)
     for lot in lots.values():
         by_market[lot.market_id].append(lot)
+    # (market, bidder) -> lots of that market where the bidder takes part: each cluster only
+    # looks at its members' lots instead of scanning its whole market.
+    lots_of: dict[tuple[str, int], list[_Lot]] = defaultdict(list)
+    for lot in lots.values():
+        for firm in bidders.get(lot.lot_id, ()):
+            lots_of[(lot.market_id, firm)].append(lot)
 
     rows = []
     for cluster in clusters:
-        market_lots = by_market.get(cluster["market_id"], [])
+        market_id = cluster["market_id"]
         members = set(cluster["members"] or [])
-        split = _split_result(cluster, market_lots, bidders)
+        seen: dict[int, _Lot] = {}
+        for m in members:
+            for lot in lots_of.get((market_id, m), ()):
+                seen[lot.lot_id] = lot
+        member_lots = [seen[k] for k in sorted(seen)]
+        split = _split_result(cluster, member_lots, bidders)
         if split:
-            rows.append((TEST_SPLIT, "cluster", cluster["cluster_id"], cluster["market_id"], split))
-        member_lots = [lot for lot in market_lots if bidders.get(lot.lot_id, set()) & members]
+            rows.append((TEST_SPLIT, "cluster", cluster["cluster_id"], market_id, split))
         entry = _entry_result(member_lots, bidders, members)
         if entry:
             entry["evidence"]["members"] = sorted(members)
-            rows.append((TEST_ENTRY, "cluster", cluster["cluster_id"], cluster["market_id"], entry))
+            rows.append((TEST_ENTRY, "cluster", cluster["cluster_id"], market_id, entry))
 
     for market_id in sorted(by_market):
         entry = _entry_result(by_market[market_id], bidders, set())

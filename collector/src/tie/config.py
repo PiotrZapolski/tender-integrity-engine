@@ -6,6 +6,20 @@ from dataclasses import dataclass
 from pathlib import Path
 
 USER_AGENT = "TenderIntegrityEngine/0.1 (+https://github.com/PiotrZapolski/tender-integrity-engine)"
+# Signal statuses from the lowest to the highest; `ENGINE_MAX_STATUS` caps what the engine sets.
+ENGINE_STATUSES = ("hidden", "review", "published")
+DEFAULT_ENGINE_MAX_STATUS = "review"
+
+
+def engine_max_status(env: Mapping[str, str] | None = None) -> str:
+    """`ENGINE_MAX_STATUS` (default `review`): the highest status the engine may give a signal.
+
+    With the default nothing is published; `published` lets the publish gate decide."""
+    e = os.environ if env is None else env
+    value = (e.get("ENGINE_MAX_STATUS") or DEFAULT_ENGINE_MAX_STATUS).strip().lower()
+    if value not in ENGINE_STATUSES:
+        raise ValueError(f"ENGINE_MAX_STATUS must be one of {ENGINE_STATUSES}, got {value!r}")
+    return value
 
 
 @dataclass(frozen=True)
@@ -18,6 +32,7 @@ class Settings:
     deepseek_model: str
     ai_daily_budget_usd: float
     wl_daily_cap: int
+    engine_max_status: str = DEFAULT_ENGINE_MAX_STATUS
 
 
 def load_settings(env: Mapping[str, str] | None = None) -> Settings:
@@ -31,4 +46,5 @@ def load_settings(env: Mapping[str, str] | None = None) -> Settings:
         deepseek_model=e.get("DEEPSEEK_MODEL", "deepseek-chat"),
         ai_daily_budget_usd=float(e.get("AI_DAILY_BUDGET_USD", "5.0")),
         wl_daily_cap=int(e.get("WL_DAILY_CAP", "90")),
+        engine_max_status=engine_max_status(e),
     )

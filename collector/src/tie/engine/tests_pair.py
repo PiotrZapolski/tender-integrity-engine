@@ -40,6 +40,7 @@ import statistics
 from bisect import bisect_left, bisect_right
 from collections import defaultdict
 from dataclasses import dataclass, field
+from typing import Any
 
 import psycopg
 from psycopg.types.json import Jsonb
@@ -305,21 +306,30 @@ def _consortium_results(
     if not candidates:
         return []
 
+    # One query for the parsed offers of every firm involved in a candidate, then the
+    # "separate starts before the consortium lot" count per candidate in Python.
+    involved = sorted({lot["leader"] for lot, _ in candidates} | {p for _, p in candidates})
+    starts: dict[tuple[str, int], dict[int, Any]] = defaultdict(dict)
+    for r in conn.execute(
+        "select distinct lm.market_id, b.lot_id, b.bidder_id, p.published_at"
+        " from bids b"
+        " join documents d on d.id = b.document_id and d.status = 'parsed'"
+        " join lot_market lm on lm.lot_id = b.lot_id and lm.run_id = %s"
+        " join lots l on l.id = b.lot_id"
+        " join procedures p on p.ocds_id = l.procedure_id"
+        " where b.bidder_id = any(%s)",
+        (run_id, involved),
+    ).fetchall():
+        starts[(r["market_id"], r["bidder_id"])][r["lot_id"]] = r["published_at"]
+
     events: dict[tuple[int, int, str], list[dict]] = defaultdict(list)
     for lot, partner in candidates:
-        leader = lot["leader"]
-        separate = conn.execute(
-            "select count(distinct x.lot_id) as n from bids x"
-            " join bids y on y.lot_id = x.lot_id and y.id <> x.id"
-            " join documents dx on dx.id = x.document_id and dx.status = 'parsed'"
-            " join documents dy on dy.id = y.document_id and dy.status = 'parsed'"
-            " join lot_market lm on lm.lot_id = x.lot_id and lm.run_id = %s"
-            "  and lm.market_id = %s"
-            " join lots l on l.id = x.lot_id"
-            " join procedures p on p.ocds_id = l.procedure_id"
-            " where x.bidder_id = %s and y.bidder_id = %s and p.published_at < %s",
-            (run_id, lot["market_id"], leader, partner, lot["published_at"]),
-        ).fetchone()["n"]
+        leader, mid, before = lot["leader"], lot["market_id"], lot["published_at"]
+        mine, theirs = starts.get((mid, leader), {}), starts.get((mid, partner), {})
+        separate = 0
+        if before is not None:
+            separate = sum(1 for lot_id in mine.keys() & theirs.keys()
+                           if mine[lot_id] is not None and mine[lot_id] < before)
         if separate >= MIN_SEPARATE_STARTS:
             a, b = sorted((leader, partner))
             events[(a, b, lot["market_id"])].append(

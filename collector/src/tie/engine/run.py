@@ -9,6 +9,12 @@ re-raises, so the job queue retries it.
 
 A session advisory lock keeps two runs from writing the analytical tables at once (for
 example the worker job and a manual `tie engine-run --now`).
+
+After a run is `done`, per-run history is pruned: `test_results`, `pairs` and `clusters`
+keep only the rows of the last `KEEP_DONE_RUNS` done runs (rows of failed or abandoned runs
+go too), and `explanations` drops the rows of an older evidence hash once the signal has an
+explanation for its current hash. `lot_market` and `markets` hold no history (one row per
+lot / market). A pruning error is logged and does not fail the finished run.
 """
 
 from __future__ import annotations
@@ -20,6 +26,7 @@ from typing import Any
 import psycopg
 from psycopg.types.json import Jsonb
 
+from tie.config import engine_max_status
 from tie.engine.decide import upsert_signals
 from tie.engine.explain import explain_signal
 from tie.engine.graph import build_pairs, find_clusters
@@ -37,6 +44,9 @@ ENGINE_LOCK_KEY = 720_261_012
 # A run still `running` after this long was lost (worker killed); it is marked failed.
 STALE_RUN_INTERVAL = "12 hours"
 MAX_ERROR_LEN = 2000
+# Per-run tables keep the rows of this many latest done runs.
+KEEP_DONE_RUNS = 2
+PER_RUN_TABLES = ("test_results", "pairs", "clusters")
 
 UNEXPLAINED_SQL = """
 select s.signal_id from signals s
@@ -47,11 +57,41 @@ order by s.signal_id
 """
 
 
+PRUNE_EXPLANATIONS_SQL = """
+delete from explanations e
+using signals s
+where s.signal_id = e.signal_id
+  and e.evidence_hash is distinct from s.evidence_hash
+  and exists (select 1 from explanations c
+              where c.signal_id = s.signal_id and c.evidence_hash = s.evidence_hash)
+"""
+
+
 class EngineBusy(RuntimeError):
     """Another engine run holds the lock."""
 
 
-def _start(conn: psycopg.Connection, as_of: date, full: bool) -> int:
+def prune(conn: psycopg.Connection, keep: int = KEEP_DONE_RUNS) -> dict[str, int]:
+    """Delete per-run rows outside the last `keep` done runs and stale explanations.
+
+    Must run under the engine lock (no other run writing). Commits; returns deleted rows per
+    table. With no done run nothing is deleted.
+    """
+    kept = [r["run_id"] for r in conn.execute(
+        "select run_id from engine_runs where status = 'done' order by run_id desc limit %s",
+        (keep,),
+    ).fetchall()]
+    deleted: dict[str, int] = {}
+    if kept:
+        for table in PER_RUN_TABLES:
+            cur = conn.execute(f"delete from {table} where not (run_id = any(%s))", (kept,))
+            deleted[table] = cur.rowcount
+    deleted["explanations"] = conn.execute(PRUNE_EXPLANATIONS_SQL).rowcount
+    conn.commit()
+    return deleted
+
+
+def _start(conn: psycopg.Connection, as_of: date, full: bool, max_status: str) -> int:
     conn.execute(
         "update engine_runs set status = 'failed', finished_at = now(),"
         " params = params || jsonb_build_object('error', 'abandoned: still running after '"
@@ -62,7 +102,7 @@ def _start(conn: psycopg.Connection, as_of: date, full: bool) -> int:
     run_id = conn.execute(
         "insert into engine_runs(as_of, params, status) values (%s, %s, 'running')"
         " returning run_id",
-        (as_of, Jsonb({"full": full})),
+        (as_of, Jsonb({"full": full, "max_status": max_status})),
     ).fetchone()["run_id"]
     conn.commit()
     return run_id
@@ -109,16 +149,22 @@ def run_engine(ctx, as_of: date, *, full: bool = False) -> dict:
     window; the flag marks the weekly full recompute once daily runs become incremental.
     Signals use `ctx.decider` (Jev; None means the fallback regression and at most
     `review`), explanations use `ctx.text_provider` (DeepSeek; None keeps the template).
+    No signal gets a status above `ENGINE_MAX_STATUS` (`ctx.settings`, else the environment;
+    default `review`).
     """
     conn = ctx.conn
+    settings = getattr(ctx, "settings", None)
+    max_status = (settings.engine_max_status if settings is not None
+                  else engine_max_status())
     got = conn.execute("select pg_try_advisory_lock(%s) ok",
                        (ENGINE_LOCK_KEY,)).fetchone()["ok"]
     conn.commit()
     if not got:
         raise EngineBusy("another engine run is in progress")
     try:
-        run_id = _start(conn, as_of, full)
-        log.info("engine run %s: as_of=%s full=%s", run_id, as_of, full)
+        run_id = _start(conn, as_of, full, max_status)
+        log.info("engine run %s: as_of=%s full=%s max_status=%s", run_id, as_of, full,
+                 max_status)
         steps = [
             ("catalog", lambda: seed_catalog(conn)),
             ("markets", lambda: assign_markets(conn, run_id, as_of)),
@@ -128,7 +174,8 @@ def run_engine(ctx, as_of: date, *, full: bool = False) -> dict:
             ("firm_tests", lambda: compute_firm_tests(conn, run_id)),
             ("pair_tests", lambda: compute_pair_tests(conn, run_id)),
             ("market_tests", lambda: compute_market_tests(conn, run_id)),
-            ("signals", lambda: upsert_signals(conn, run_id, ctx.decider)),
+            ("signals", lambda: upsert_signals(conn, run_id, ctx.decider,
+                                               max_status=max_status)),
             ("explanations", lambda: _explain_published(conn, ctx.text_provider)),
         ]
         counts: dict[str, Any] = {}
@@ -150,6 +197,18 @@ def run_engine(ctx, as_of: date, *, full: bool = False) -> dict:
             log.info("engine run %s: %s %s", run_id, name, counts[name])
         _finish(conn, run_id, "done", {"counts": counts})
         log.info("engine run %s: done", run_id)
+        try:
+            counts["prune"] = prune(conn)
+            conn.execute(
+                "update engine_runs set params = jsonb_set(params, '{counts,prune}', %s)"
+                " where run_id = %s",
+                (Jsonb(counts["prune"]), run_id),
+            )
+            conn.commit()
+            log.info("engine run %s: prune %s", run_id, counts["prune"])
+        except psycopg.Error:
+            conn.rollback()
+            log.warning("engine run %s: pruning failed", run_id, exc_info=True)
         return {"run_id": run_id, "status": "done", "as_of": as_of.isoformat(),
                 "full": full, "counts": counts}
     finally:

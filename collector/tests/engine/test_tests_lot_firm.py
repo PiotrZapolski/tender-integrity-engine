@@ -164,10 +164,26 @@ def test_never_winning_firm_and_single_offer_firm(db):
     run_id = _run(db, out["as_of"])
     market = _assign(db, run_id, out)
 
+    def winning(lot_id):
+        return db.execute("select price_winner from lots where id = %s",
+                          (lot_id,)).fetchone()["price_winner"]
+
+    # Cover-bid shape: 6 of 10 losing offers within 10% of the winner.
     loser = _add_firm(db, "Zawsze Przegrywa sp. z o.o.", "2222222222")
+    for i, lot in enumerate(out["lots"][:10]):
+        factor = Decimal("1.05") if i < 6 else Decimal("1.30")
+        _add_bid(db, lot, loser, "Zawsze Przegrywa sp. z o.o.", winning(lot) * factor)
+    # Honest loser: always far above everybody, never close to the winner.
+    honest = _add_firm(db, "Uczciwie Przegrywa sp. z o.o.", "4444444444")
     for lot in out["lots"][:10]:
         top = max(b["price"] for b in _bids(db, lot))
-        _add_bid(db, lot, loser, "Zawsze Przegrywa sp. z o.o.", top * Decimal("1.2"))
+        _add_bid(db, lot, honest, "Uczciwie Przegrywa sp. z o.o.", top * Decimal("1.2"),
+                 offer_no=98)
+    # Close in only 4 of 10 starts: below half, no row.
+    rare = _add_firm(db, "Czasem Blisko sp. z o.o.", "5555555555")
+    for i, lot in enumerate(out["lots"][:10]):
+        factor = Decimal("1.08") if i < 4 else Decimal("1.50")
+        _add_bid(db, lot, rare, "Czasem Blisko sp. z o.o.", winning(lot) * factor, offer_no=97)
     single = _add_firm(db, "Jedna Oferta sp. z o.o.", "3333333333")
     _add_bid(db, out["lots"][10], single, "Jedna Oferta sp. z o.o.", Decimal("999999.00"))
     db.commit()
@@ -182,8 +198,12 @@ def test_never_winning_firm_and_single_offer_firm(db):
     key = f"{loser}@{market}"
     assert key in never
     assert never[key]["value"] == 10
-    assert never[key]["evidence"] == {"bidder_id": loser, "starts": 10, "wins": 0}
+    assert never[key]["evidence"] == {"bidder_id": loser, "starts": 10, "wins": 0,
+                                      "close_losses": 6}
     assert never[key]["n_obs"] >= 10 and never[key]["percentile"] > 0.5
+    # I2: losing by a wide margin is not the cover-bid shape.
+    assert f"{honest}@{market}" not in never
+    assert f"{rare}@{market}" not in never
     assert all(r["evidence"]["wins"] == 0 and r["value"] >= 8 for r in never.values())
     share = _results(db, run_id, "3.1.1", "firm")
     assert share[key]["value"] == 0.0

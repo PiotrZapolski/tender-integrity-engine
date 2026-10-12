@@ -211,3 +211,86 @@ def test_entrant_with_twenty_percent_price_drop(db):
     market_row = _result(db, run_id, "3.3.10", "market", MARKET)
     assert market_row is not None
     assert abs(market_row["value"] - (-0.2)) < 0.03
+
+
+# --- 3.1.2 over contested lots only ---------------------------------------------------------
+
+
+def _split_market(db, plan):
+    """Lots from `plan`: (buyer index, winner index 0/1, other member bids too).
+
+    Two members; a lot where the other member bids too has 2 offers, else 1.
+    """
+    with db.cursor() as cur:
+        members = [_firm(cur, i) for i in range(2)]
+        buyers = [
+            cur.execute(
+                "insert into buyers(nip, name, province) values (%s, %s, '14') returning id",
+                (f"99900001{j:02d}", f"Gmina Podzialu {j}"),
+            ).fetchone()["id"]
+            for j in range(1 + max(b for b, _, _ in plan))
+        ]
+        lots = []
+        for k, (buyer, w, both) in enumerate(plan):
+            day = START + timedelta(days=7 * k)
+            winner = members[w]
+            bidders = [winner, members[1 - w]] if both else [winner]
+            ocds = f"ocds-split-{k:03d}"
+            cur.execute(
+                "insert into procedures(ocds_id, bzp_number, notice_number, buyer_id, title,"
+                " cpv_main, published_at) values (%s, %s, %s, %s, 'Usługi', '45233000-7', %s)",
+                (ocds, f"2024/BZP S{k:05d}", f"SPLIT/{k:03d}", buyers[buyer],
+                 datetime.combine(day, datetime.min.time(), tzinfo=UTC)),
+            )
+            lot_id = cur.execute(
+                "insert into lots(procedure_id, lot_no, cpv, estimated_value, outcome, n_offers,"
+                " price_winner, contract_date, winner_bidder_id)"
+                " values (%s, 1, '45233000-7', 1000, 'umowa', %s, 900, %s, %s) returning id",
+                (ocds, len(bidders), day + timedelta(days=14), winner),
+            ).fetchone()["id"]
+            if both:
+                doc = cur.execute(
+                    "insert into documents(procedure_id, source, source_doc_id, file_name,"
+                    " doc_type, status) values (%s, 'test', %s, 'otwarcie.pdf', 'opening',"
+                    " 'parsed') returning id",
+                    (ocds, f"split-{k}"),
+                ).fetchone()["id"]
+                cur.executemany(
+                    "insert into bids(lot_id, document_id, offer_no, bidder_id, bidder_name_raw,"
+                    " price, is_winner, parse_method) values (%s, %s, %s, %s, %s, %s, %s, 'test')",
+                    [(lot_id, doc, pos + 1, b, f"Firma {b}", 900 + 50 * pos, b == winner)
+                     for pos, b in enumerate(bidders)],
+                )
+            lots.append(lot_id)
+    db.commit()
+    run_id = _new_run(db, date(2026, 1, 1))
+    _assign(db, run_id, lots)
+    cid = _cluster(db, run_id, members)
+    return run_id, cid
+
+
+def test_home_buyers_with_single_offers_are_not_a_split(db):
+    """I2: each firm wins alone at its own buyers and they meet a few times elsewhere."""
+    plan = [(b, 0 if b < 2 else 1, False) for b in range(4) for _ in range(5)]
+    plan += [(4, 0, True), (4, 1, True), (4, 1, True)]
+    run_id, cid = _split_market(db, plan)
+
+    compute_market_tests(db, run_id)
+
+    assert _result(db, run_id, "3.1.2", "cluster", cid) is None
+
+
+def test_split_counts_contested_lots_at_buyers_with_two_or_more(db):
+    # Both bid everywhere; the first firm always wins at buyers 0-1, the second at 2-3.
+    plan = [(b, 0 if b < 2 else 1, True) for b in range(4) for _ in range(5)]
+    plan += [(5, 1, True)]    # a buyer with one contested lot: left out
+    plan += [(0, 1, False)]   # an uncontested lot: left out
+    run_id, cid = _split_market(db, plan)
+
+    compute_market_tests(db, run_id)
+
+    row = _result(db, run_id, "3.1.2", "cluster", cid)
+    assert row is not None
+    assert row["value"] == 1.0
+    assert row["n_obs"] == 20
+    assert row["evidence"]["n_buyers"] == 4

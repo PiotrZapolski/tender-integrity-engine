@@ -31,6 +31,8 @@ def test_catalog_sections_and_fields():
         assert c.title and c.how
         text = c.title + c.how
         assert chr(0x2014) not in text and chr(0x2013) not in text
+        # Every `how` stands on its own on the public page: no "j.w." back references.
+        assert "j.w." not in c.how, c.item
 
 
 def test_catalog_known_rows():

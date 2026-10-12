@@ -1,10 +1,21 @@
 """Decyzja o sygnale klastra: Jev ze skalibrowanym prawdopodobieństwem per punkt OECD,
 regresja logistyczna jako wariant zapasowy, zapis sygnałów z progami publikacji.
 
-Arytmetyka zostaje w kodzie: Jev dostaje pakiet dowodów (`tie.engine.evidence`) jako `state`
-i dla każdego punktu OECD obecnego w dowodach pytanie `noul` z liczbami tego punktu, plus
-`score` siły sygnału w 5 poziomach. Łączne prawdopodobieństwo liczymy w kodzie:
+Arytmetyka zostaje w kodzie: Jev dostaje pakiet dowodów (`tie.engine.evidence`) jako `state`,
+ale tylko z punktami obecnymi (`present_items`: z percentylem albo flaga/liczba zdarzeń > 0),
+i dla każdego z nich pytanie `noul` z liczbami tego punktu, plus `score` siły sygnału
+w 5 poziomach. Łączne prawdopodobieństwo liczymy w kodzie, z 3 najsilniejszych punktów:
 `p = 1 - prod(1 - p_i * w_i)`, `w_i` = 1 dla punktów A i 0.6 dla C.
+
+Bramka publikacji (ochrona przed fałszywym alarmem): status `published` wymaga decyzji Jev
+z `p >= publish_threshold`, najsilniejszego punktu z `p_i >= 0.8` i co najmniej dwóch punktów
+z `p_i >= 0.6`. Ponad to status nigdy nie przekracza `ENGINE_MAX_STATUS` (domyślnie `review`,
+więc bez jawnej zgody operatora nic nie jest publikowane).
+
+Błędy Jev: odpowiedź 4xx inna niż 429 (zły klucz, zły kształt zapytania, zła nazwa modelu)
+wyłącza Jev do końca przebiegu, tak samo przekroczony budżet i kilka kolejnych błędów innego
+rodzaju; reszta klastrów idzie regresją zapasową, a powód trafia do
+`engine_runs.params.jev_disabled_reason`.
 
 Wiersz `signals`: `signal_id` = `cluster_id`, `oecd` = mapa punkt -> prawdopodobieństwo
 (dla Jev noul, dla regresji wejście testu 0..1), `evidence` = pakiet dowodów z dodatkowym
@@ -22,7 +33,8 @@ import psycopg
 from psycopg.types.json import Jsonb
 
 from tie.ai.providers import BudgetExceeded, ProviderHttpError
-from tie.engine.evidence import CHECKED, build_evidence, evidence_hash
+from tie.config import ENGINE_STATUSES, engine_max_status
+from tie.engine.evidence import CHECKED, build_evidence, evidence_hash, present_items
 from tie.engine.oecd import CATALOG
 
 log = logging.getLogger(__name__)
@@ -37,6 +49,14 @@ STRENGTH_LEVELS = [
     "silny sygnał",
     "bardzo silny sygnał",
 ]
+# Łączne prawdopodobieństwo z tylu najsilniejszych punktów (więcej słabych punktów nie
+# może dać razem wysokiego wyniku).
+TOP_ITEMS = 3
+# Bramka publikacji: najsilniejszy punkt co najmniej PUBLISH_MAX_ITEM i co najmniej
+# PUBLISH_MIN_ITEMS punktów z prawdopodobieństwem co najmniej PUBLISH_ITEM_FLOOR.
+PUBLISH_MAX_ITEM = 0.8
+PUBLISH_ITEM_FLOOR = 0.6
+PUBLISH_MIN_ITEMS = 2
 # Regresja zapasowa: stałe wagi na wejściach testów (percentyl 0..1), wyraz wolny.
 FALLBACK_WEIGHTS = {
     "3.1.6": 2.0,
@@ -56,8 +76,9 @@ ENTRY_DROP = -0.10
 SOURCE_JEV = "jev"
 SOURCE_FALLBACK = "fallback"
 SOURCE_EMPTY = "empty"
-# Odpowiedź z tymi statusami HTTP dotyczy klucza, nie klastra: nie pytamy dalej w tym przebiegu.
-AUTH_STATUSES = frozenset({401, 403})
+# Po tylu kolejnych błędach innych niż HTTP (sieć, zła odpowiedź) Jev jest wyłączany.
+MAX_CONSECUTIVE_ERRORS = 5
+MAX_BODY_LOG = 500
 
 _TITLES = {c.item: c.title for c in CATALOG}
 _HOW = {c.item: c.how for c in CATALOG}
@@ -131,11 +152,17 @@ def build_questions(evidence: dict) -> dict:
     return questions
 
 
+def _weighted(item: str, p: float) -> float:
+    return p * ITEM_WEIGHTS.get(CHECKED.get(item, ""), 0.0)
+
+
 def combine(per_item: dict[str, float]) -> float:
-    """`p = 1 - prod(1 - p_i * w_i)`, `w_i` = 1 dla punktów A i 0.6 dla C."""
+    """`p = 1 - prod(1 - p_i * w_i)` po `TOP_ITEMS` najsilniejszych punktach,
+    `w_i` = 1 dla punktów A i 0.6 dla C."""
+    contributions = sorted((_weighted(item, p) for item, p in per_item.items()), reverse=True)
     keep = 1.0
-    for item, p in per_item.items():
-        keep *= 1.0 - p * ITEM_WEIGHTS.get(CHECKED.get(item, ""), 0.0)
+    for x in contributions[:TOP_ITEMS]:
+        keep *= 1.0 - x
     return 1.0 - keep
 
 
@@ -154,19 +181,18 @@ def _noul(answers: dict, key: str) -> float:
 
 
 def decide_cluster(decider: Decider, evidence: dict) -> Decision:
-    """Decyzja Jev dla pakietu dowodów. Błędy dostawcy i niepełne odpowiedzi przechodzą
-    wyżej jako wyjątki (wtedy `upsert_signals` używa regresji zapasowej)."""
-    questions = build_questions(evidence)
-    items = [k for k in questions if k != STRENGTH_KEY]
+    """Decyzja Jev dla pakietu dowodów. Model dostaje tylko punkty obecne
+    (`present_items`). Błędy dostawcy i niepełne odpowiedzi przechodzą wyżej jako wyjątki
+    (wtedy `upsert_signals` używa regresji zapasowej)."""
+    items = present_items(evidence)
     if not items:
         return Decision(probability=0.0, strength=1.0, per_item={}, source=SOURCE_EMPTY)
-    answers = decider.decide(task=TASK, state=evidence, questions=questions)
+    state = {**evidence, "oecd": items}
+    questions = build_questions(state)
+    answers = decider.decide(task=TASK, state=state, questions=questions)
     if not isinstance(answers, dict):
         raise TypeError("jev answers is not an object")
-    per_item = {
-        item: round(_noul(answers, question_key(item)), 4)
-        for item in evidence["oecd"] if item in CHECKED
-    }
+    per_item = {item: round(_noul(answers, question_key(item)), 4) for item in items}
     probability = combine(per_item)
     score = (answers.get(STRENGTH_KEY) or {}).get("score")
     try:
@@ -212,13 +238,32 @@ def fallback_decision(evidence: dict) -> Decision:
                     per_item=per_item, source=SOURCE_FALLBACK)
 
 
-def status_for(decision: Decision, publish_threshold: float, review_threshold: float) -> str:
-    """Status wg progów; tylko decyzja Jev może zostać opublikowana."""
-    if decision.source == SOURCE_JEV and decision.probability >= publish_threshold:
-        return "published"
-    if decision.probability >= review_threshold:
-        return "review"
-    return "hidden"
+def passes_publish_gate(decision: Decision) -> bool:
+    """Najsilniejszy punkt co najmniej 0.8 i co najmniej dwa punkty co najmniej 0.6."""
+    values = list(decision.per_item.values())
+    return (max(values, default=0.0) >= PUBLISH_MAX_ITEM
+            and sum(1 for v in values if v >= PUBLISH_ITEM_FLOOR) >= PUBLISH_MIN_ITEMS)
+
+
+def cap_status(status: str, max_status: str) -> str:
+    """Status nie wyższy niż `max_status` (kolejność hidden < review < published)."""
+    if ENGINE_STATUSES.index(status) > ENGINE_STATUSES.index(max_status):
+        return max_status
+    return status
+
+
+def status_for(decision: Decision, publish_threshold: float, review_threshold: float,
+               max_status: str = "published") -> str:
+    """Status wg progów i bramki publikacji; tylko decyzja Jev może zostać opublikowana,
+    a wynik nigdy nie przekracza `max_status`."""
+    if (decision.source == SOURCE_JEV and decision.probability >= publish_threshold
+            and passes_publish_gate(decision)):
+        status = "published"
+    elif decision.probability >= review_threshold:
+        status = "review"
+    else:
+        status = "hidden"
+    return cap_status(status, max_status)
 
 
 def _stored_decision(row: dict) -> Decision | None:
@@ -251,22 +296,51 @@ def _upsert(conn: psycopg.Connection, run_id: int, cluster: dict, evidence: dict
     )
 
 
+def _record_jev_disabled(conn: psycopg.Connection, run_id: int, reason: str) -> None:
+    conn.execute(
+        "update engine_runs set params = params || jsonb_build_object("
+        "'jev_disabled_reason', %s::text) where run_id = %s",
+        (reason, run_id),
+    )
+    conn.commit()
+
+
+def _http_error_disables_jev(status: int) -> bool:
+    """Każde 4xx poza 429 dotyczy zapytania albo klucza, nie klastra: dalsze pytania w tym
+    przebiegu skończyłyby się tak samo."""
+    return 400 <= status < 500 and status != 429
+
+
 def upsert_signals(conn: psycopg.Connection, run_id: int, decider: Decider | None, *,
-                   publish_threshold: float = 0.91, review_threshold: float = 0.6) -> dict:
+                   publish_threshold: float = 0.91, review_threshold: float = 0.6,
+                   max_status: str | None = None) -> dict:
     """Sygnał dla każdego klastra przebiegu `run_id`; zwraca liczniki.
 
+    `max_status` (domyślnie z `ENGINE_MAX_STATUS`, czyli `review`) ogranicza status z góry.
     Gdy `evidence_hash` sygnału się nie zmienił, a poprzednia decyzja pochodziła z Jev,
     model nie jest pytany ponownie. Bez decidera, po `BudgetExceeded` albo błędzie dostawcy
     decyduje regresja zapasowa, a status jest co najwyżej `review`. Każdy klaster jest
     zatwierdzany osobno, żeby zapłacona decyzja nie przepadła przy późniejszym błędzie.
     """
-    counts = {"clusters": 0, "published": 0, "review": 0, "hidden": 0,
-              "jev_calls": 0, "reused": 0, "fallback": 0}
+    if max_status is None:
+        max_status = engine_max_status()
+    if max_status not in ENGINE_STATUSES:
+        raise ValueError(f"unknown max status {max_status!r}")
+    counts: dict[str, Any] = {"clusters": 0, "published": 0, "review": 0, "hidden": 0,
+                              "jev_calls": 0, "reused": 0, "fallback": 0}
     clusters = conn.execute(
         "select cluster_id, market_id from clusters where run_id = %s order by cluster_id",
         (run_id,),
     ).fetchall()
     jev_off = decider is None
+    consecutive_errors = 0
+
+    def disable(reason: str) -> None:
+        nonlocal jev_off
+        jev_off = True
+        counts["jev_disabled_reason"] = reason
+        _record_jev_disabled(conn, run_id, reason)
+
     for cluster in clusters:
         evidence = build_evidence(conn, run_id, cluster["cluster_id"])
         ehash = evidence_hash(evidence)
@@ -283,25 +357,42 @@ def upsert_signals(conn: psycopg.Connection, run_id: int, decider: Decider | Non
         if decision is None and not jev_off:
             try:
                 decision = decide_cluster(decider, evidence)
+                consecutive_errors = 0
                 if decision.source == SOURCE_JEV:
                     counts["jev_calls"] += 1
             except BudgetExceeded:
                 log.warning("AI budget exceeded, fallback decisions for the rest of run %s",
                             run_id)
-                jev_off = True
+                disable("budget exceeded")
             except ProviderHttpError as e:
-                log.warning("jev error for cluster %s: HTTP %s", cluster["cluster_id"],
-                            e.status)
-                jev_off = e.status in AUTH_STATUSES
+                if _http_error_disables_jev(e.status):
+                    # The message carries the start of the response body (never the key).
+                    log.error("jev HTTP %s for cluster %s, Jev off for the rest of run %s: %s",
+                              e.status, cluster["cluster_id"], run_id,
+                              str(e)[:MAX_BODY_LOG])
+                    disable(f"HTTP {e.status}")
+                else:
+                    log.warning("jev error for cluster %s: HTTP %s", cluster["cluster_id"],
+                                e.status)
+                    consecutive_errors += 1
             except Exception as e:  # noqa: BLE001 - other provider failure or bad answer
                 log.warning("jev decision failed for cluster %s: %s", cluster["cluster_id"],
                             type(e).__name__)
+                consecutive_errors += 1
+            if not jev_off and consecutive_errors >= MAX_CONSECUTIVE_ERRORS:
+                log.error("jev failed %s times in a row, Jev off for the rest of run %s",
+                          consecutive_errors, run_id)
+                disable(f"{consecutive_errors} consecutive errors")
         if decision is None:
             decision = fallback_decision(evidence)
             counts["fallback"] += 1
-        status = status_for(decision, publish_threshold, review_threshold)
+        status = status_for(decision, publish_threshold, review_threshold, max_status)
         _upsert(conn, run_id, cluster, evidence, ehash, decision, status)
         conn.commit()
         counts["clusters"] += 1
         counts[status] += 1
+    if decider is not None and counts["jev_calls"] == 0 and counts["fallback"] > 0:
+        log.warning("engine run %s: a Jev decider is configured but made no decision"
+                    " (%s fallback decisions)", run_id, counts["fallback"])
+        counts["warning"] = "decider configured, 0 jev calls"
     return counts

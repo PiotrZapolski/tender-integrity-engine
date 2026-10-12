@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-from tie.config import load_settings
+from tie.config import engine_max_status, load_settings
 
 
 def test_defaults():
@@ -30,3 +30,14 @@ def test_overrides():
 def test_missing_database_url_raises():
     with pytest.raises(KeyError):
         load_settings({})
+
+
+def test_engine_max_status_defaults_to_review_and_validates():
+    assert load_settings({"DATABASE_URL": "x"}).engine_max_status == "review"
+    assert engine_max_status({}) == "review"
+    assert engine_max_status({"ENGINE_MAX_STATUS": ""}) == "review"
+    assert engine_max_status({"ENGINE_MAX_STATUS": " Published "}) == "published"
+    assert load_settings({"DATABASE_URL": "x", "ENGINE_MAX_STATUS": "hidden"}
+                         ).engine_max_status == "hidden"
+    with pytest.raises(ValueError):
+        engine_max_status({"ENGINE_MAX_STATUS": "public"})
