@@ -1,0 +1,18 @@
+name: deploy
+on:
+  push:
+    branches: [master]
+  workflow_dispatch:
+jobs:
+  deploy:
+    runs-on: [self-hosted, tie]
+    steps:
+      - uses: actions/checkout@v4
+      - name: sync code
+        run: rsync -a --delete --exclude .git --exclude infra/.env --exclude data ./ /var/www/tie/
+      - name: up
+        working-directory: /var/www/tie/infra
+        run: docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build
+      - name: stats
+        working-directory: /var/www/tie/infra
+        run: docker compose -f docker-compose.yml -f docker-compose.prod.yml run --rm worker tie stats

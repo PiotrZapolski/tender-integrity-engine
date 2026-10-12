@@ -1,0 +1,3 @@
+services:
+  worker:
+    volumes: ["/var/www/tie/data/raw:/data/raw"]
