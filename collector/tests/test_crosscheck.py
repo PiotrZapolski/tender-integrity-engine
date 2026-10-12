@@ -43,3 +43,15 @@ def test_wrong_winner_nip():
 def test_inconsistent_prices():
     bad = rows([(n, p) for n, p in SPY[:-1]] + [("MULTISERVICE Sp. z o.o.", "30.00")])
     assert "prices" in cross_check(bad, FACTS).reasons
+
+
+def test_bzp_incomplete():
+    facts = LotFacts(None, None, D("301571.04"), None, None, "multiservice spzoo")
+    r = cross_check(rows(SPY), facts)
+    assert not r.ok and "bzp_incomplete" in r.reasons
+
+
+def test_winner_name_mismatch():
+    facts = LotFacts(8, D("239497.36"), D("301571.04"), D("239497.36"), None, "inna firma spzoo")
+    r = cross_check(rows(SPY), facts)
+    assert not r.ok and r.reasons == ["winner"]
