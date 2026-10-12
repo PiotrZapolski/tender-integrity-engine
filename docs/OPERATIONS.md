@@ -91,7 +91,32 @@ select status, count(*) from documents where doc_type = 'opening' group by 1 ord
 select count(*) filter (where outside_bzp_range) outside, count(*) bids from bids;
 ```
 
-The same works for `needs_review` documents. Bids that fail during identity matching are
+The same works for `needs_review` documents. After a parser release that changes what can
+be read (for example per-lot acceptance, the `bzp_partial` rule, `.doc`/`.odt` support or
+the OCR orientation fix), re-queue both kinds in one go:
+
+```sql
+insert into jobs(kind, key, payload)
+select 'opening_parse', source_doc_id || '@reparse-' || to_char(now(), 'YYYYMMDDHH24MI'),
+       jsonb_build_object('document_id', id)
+from documents
+where status in ('mismatch', 'needs_review') and doc_type = 'opening'
+  and coalesce(error, '') <> 'raw_missing'
+on conflict (kind, key) do nothing;
+```
+
+Each re-parsed document makes at most one DeepSeek call (`AI_DAILY_BUDGET_USD` still
+applies). `parsed` documents with `error` starting with `partial:` have bids for the lots
+that passed and none for the lots listed after `partial:` (`partial` in `tie stats`); the
+`notes:` part names the relaxed cross-check rules that were used (`bzp_partial`,
+`winner_by_price`, `winner_unscaled`, `bzp_no_winner`, `lot_offset:<d>`). Watch the result:
+
+```sql
+select status, split_part(error, ':', 1) kind, count(*) from documents
+where doc_type = 'opening' group by 1, 2 order by 1, 3 desc;
+```
+
+Bids that fail during identity matching are
 logged (`identity: bid <id> skipped`) and retried by the next `identity` job; they never
 block the other bids. Each failed run increments `bids.identity_failures`; after 3 failed
 runs the bid is excluded from matching (`bids_identity_excluded` in `tie stats`). A rejected
