@@ -9,6 +9,7 @@ USER_AGENT = "TenderIntegrityEngine/0.1 (+https://github.com/PiotrZapolski/tende
 # Signal statuses from the lowest to the highest; `ENGINE_MAX_STATUS` caps what the engine sets.
 ENGINE_STATUSES = ("hidden", "review", "published")
 DEFAULT_ENGINE_MAX_STATUS = "review"
+DEFAULT_ENGINE_MIN_LOTS = 8
 
 
 def engine_max_status(env: Mapping[str, str] | None = None) -> str:
@@ -19,6 +20,21 @@ def engine_max_status(env: Mapping[str, str] | None = None) -> str:
     value = (e.get("ENGINE_MAX_STATUS") or DEFAULT_ENGINE_MAX_STATUS).strip().lower()
     if value not in ENGINE_STATUSES:
         raise ValueError(f"ENGINE_MAX_STATUS must be one of {ENGINE_STATUSES}, got {value!r}")
+    return value
+
+
+def engine_min_lots(env: Mapping[str, str] | None = None) -> int:
+    """`ENGINE_MIN_LOTS` (default 8): a cluster with fewer common lots stays `hidden`."""
+    e = os.environ if env is None else env
+    raw = (e.get("ENGINE_MIN_LOTS") or "").strip()
+    if not raw:
+        return DEFAULT_ENGINE_MIN_LOTS
+    try:
+        value = int(raw)
+    except ValueError:
+        raise ValueError(f"ENGINE_MIN_LOTS must be an integer, got {raw!r}") from None
+    if value < 0:
+        raise ValueError(f"ENGINE_MIN_LOTS must not be negative, got {value}")
     return value
 
 
@@ -33,6 +49,7 @@ class Settings:
     ai_daily_budget_usd: float
     wl_daily_cap: int
     engine_max_status: str = DEFAULT_ENGINE_MAX_STATUS
+    engine_min_lots: int = DEFAULT_ENGINE_MIN_LOTS
     # HMAC key for MSiG person keys (tie.identity.msig). No default value: msig_board jobs
     # refuse to run and `tie daily` does not queue them while it is unset.
     person_hmac_secret: str | None = None
@@ -52,6 +69,7 @@ def load_settings(env: Mapping[str, str] | None = None) -> Settings:
         ai_daily_budget_usd=float(e.get("AI_DAILY_BUDGET_USD", "5.0")),
         wl_daily_cap=int(e.get("WL_DAILY_CAP", "90")),
         engine_max_status=engine_max_status(e),
+        engine_min_lots=engine_min_lots(e),
         person_hmac_secret=e.get("PERSON_HMAC_SECRET") or None,
         msig_daily_cap=int(e.get("MSIG_DAILY_CAP", "500")),
         msig_recheck_days=int(e.get("MSIG_RECHECK_DAYS", "180")),

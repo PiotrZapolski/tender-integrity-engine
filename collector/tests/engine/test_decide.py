@@ -8,14 +8,22 @@ from psycopg.types.json import Jsonb
 from tie.ai.providers import BudgetExceeded, ProviderHttpError
 from tie.engine.decide import (
     FALLBACK_BIAS,
+    GATE_MIN_BUYERS,
+    GATE_MIN_LOTS,
+    GATE_OK,
+    GATE_WEAK_ONLY,
     QUESTIONS,
     STRENGTH_KEY,
     STRENGTH_LEVELS,
+    STRONG_ITEMS,
+    WEAK_ITEMS,
     Decision,
     build_questions,
     combine,
     decide_cluster,
+    evidence_gate,
     fallback_decision,
+    final_status,
     question_key,
     status_for,
     upsert_signals,
@@ -286,6 +294,10 @@ def test_build_evidence_for_cartel_cluster(db):
     assert ev["n_procedures"] == len(m["cartel_lots"])
     assert ev["period"]["from"] <= ev["period"]["to"]
     assert ev["market"]["market_id"] == "cpv5_prov:45210:30"
+    # Top-level market id and label for reviewers (`signals.evidence->>'market_id'`).
+    assert ev["market_id"] == "cpv5_prov:45210:30"
+    assert ev["market_label"] == "CPV 45210 · wielkopolskie"
+    assert ev["n_buyers"] >= 2
     # 3.2.11 rows are all 0 (no shared data): absent, not a weak item.
     assert set(ev["oecd"]) == {"3.1.1", "3.1.2", "3.1.6", "3.3.6", "3.3.7"}
     assert ev["oecd"]["3.1.6"]["n"] == 3  # outsider pair excluded
@@ -371,6 +383,7 @@ def test_cartel_published_with_fake_jev(db):
     assert 1 <= s["strength"] <= 5
     assert s["oecd"]["3.1.6"] == pytest.approx(0.9)
     assert s["evidence"]["decision"]["source"] == "jev"
+    assert s["evidence"]["decision"]["gate"] == GATE_OK
     assert len(s["evidence_hash"]) == 64
 
 
@@ -504,3 +517,170 @@ def test_budget_exceeded_is_recorded(db):
     jev = FakeJev(error=BudgetExceeded("limit"))
     counts = upsert_signals(db, run_id, jev)
     assert len(jev.calls) == 1 and counts["jev_disabled_reason"] == "budget exceeded"
+
+
+# Minimum evidence gate.
+
+# Engine run 2 (production, one month of data): p=0.950 on a 3-lot cluster from weak items
+# only, status `review`.
+PROD_EXAMPLE = {"3.1.1": 0.77, "3.3.3": 0.7, "3.3.7": 0.27}
+
+
+def _gate_evidence(per_item, *, n_lots, n_buyers=3, signal=None):
+    oecd = {}
+    for item in per_item:
+        oecd[item] = {"pct": 0.99, "value": 1.0}
+        if signal is not None and item == "3.3.10":
+            oecd[item]["signal"] = signal
+    return {"n_lots": n_lots, "n_buyers": n_buyers, "oecd": oecd}
+
+
+def test_strong_and_weak_item_lists():
+    assert STRONG_ITEMS == {"3.1.6", "3.3.6", "3.2.11", "3.1.2", "3.3.10", "3.3.5"}
+    assert WEAK_ITEMS == {"3.1.1", "3.3.3", "3.3.9", "3.1.5", "3.3.7"}
+    assert not STRONG_ITEMS & WEAK_ITEMS
+
+
+def test_production_example_is_hidden_below_min_lots():
+    """Regression: weak items alone (p=0.950) on 3 lots reached `review` in production."""
+    d = _jev(PROD_EXAMPLE, probability=round(combine(PROD_EXAMPLE), 6))
+    assert d.probability == pytest.approx(0.95, abs=0.001)
+    # Without the gate this was a review candidate.
+    assert status_for(d, 0.91, 0.6, "published") == "review"
+    ev = _gate_evidence(PROD_EXAMPLE, n_lots=3)
+    assert evidence_gate(d, ev, 8) == (GATE_MIN_LOTS, "hidden")
+    assert final_status(d, ev, 0.91, 0.6, "published", 8) == ("hidden", GATE_MIN_LOTS)
+    # With enough lots the weak items still never pass review.
+    ev8 = _gate_evidence(PROD_EXAMPLE, n_lots=8)
+    assert final_status(d, ev8, 0.91, 0.6, "published", 8) == ("review", GATE_WEAK_ONLY)
+
+
+def test_weak_items_never_published_even_when_allowed():
+    weak = _jev({"3.1.1": 0.95, "3.3.3": 0.9, "3.3.9": 0.9})
+    assert status_for(weak, 0.91, 0.6, "published") == "published"
+    ev = _gate_evidence(weak.per_item, n_lots=40)
+    assert final_status(weak, ev, 0.91, 0.6, "published", 8) == ("review", GATE_WEAK_ONLY)
+    # A strong item that did not fire (below 0.6) does not open the gate.
+    with_low = _jev({"3.1.1": 0.95, "3.3.3": 0.9, "3.1.6": 0.3})
+    ev = _gate_evidence(with_low.per_item, n_lots=40)
+    assert evidence_gate(with_low, ev, 8) == (GATE_WEAK_ONLY, "review")
+    # 3.3.10 with its own flag `signal = false` is no entry signal.
+    entry = _jev({"3.1.1": 0.95, "3.3.10": 0.9})
+    assert evidence_gate(entry, _gate_evidence(entry.per_item, n_lots=40, signal=False),
+                         8) == (GATE_WEAK_ONLY, "review")
+    assert evidence_gate(entry, _gate_evidence(entry.per_item, n_lots=40, signal=True),
+                         8) == (GATE_OK, "published")
+
+
+def test_min_lots_and_min_buyers_boundaries():
+    strong = _jev({"3.1.6": 0.95, "3.3.6": 0.7})
+    assert final_status(strong, _gate_evidence(strong.per_item, n_lots=7), 0.91, 0.6,
+                        "published", 8) == ("hidden", GATE_MIN_LOTS)
+    assert final_status(strong, _gate_evidence(strong.per_item, n_lots=8), 0.91, 0.6,
+                        "published", 8) == ("published", GATE_OK)
+    assert final_status(strong, _gate_evidence(strong.per_item, n_lots=40, n_buyers=1),
+                        0.91, 0.6, "published", 8) == ("hidden", GATE_MIN_BUYERS)
+    # ENGINE_MAX_STATUS still caps a cluster that passes the gate.
+    assert final_status(strong, _gate_evidence(strong.per_item, n_lots=40), 0.91, 0.6,
+                        "review", 8) == ("review", GATE_OK)
+    # The gate never raises a status.
+    low = _jev({"3.1.6": 0.7}, probability=0.3)
+    assert final_status(low, _gate_evidence(low.per_item, n_lots=40), 0.91, 0.6,
+                        "published", 8) == ("hidden", GATE_OK)
+
+
+class ItemJev(FakeJev):
+    """FakeJev with a given probability per OECD item (others get `noul`)."""
+
+    def __init__(self, per_item, noul=0.9):
+        super().__init__(noul=noul)
+        self.per_item = per_item
+
+    def decide(self, *, task, state, questions):
+        answers = super().decide(task=task, state=state, questions=questions)
+        for item, p in self.per_item.items():
+            if question_key(item) in answers:
+                answers[question_key(item)]["noul"] = p
+        return answers
+
+
+def _weak_setup(db, *, n_lots):
+    """The cartel cluster with only weak items (3.1.1, 3.3.3, 3.3.7) and `n_lots` lots."""
+    m, run_id = _setup(db)
+    market_id = "cpv5_prov:45210:30"
+    db.execute("delete from test_results where run_id = %s"
+               " and test_id not in ('3.1.1', '3.3.7')", (run_id,))
+    db.cursor().executemany(
+        "insert into test_results(run_id, test_id, level, entity_key, market_id, value,"
+        " percentile, n_obs) values (%s, '3.3.3', 'firm', %s, %s, 0.98, 0.95, 30)",
+        [(run_id, f"{f}@{market_id}", market_id) for f in m["cartel"]],
+    )
+    db.execute("update clusters set n_lots = %s where run_id = %s and cluster_id = %s",
+               (n_lots, run_id, CLUSTER_ID))
+    db.commit()
+    return m, run_id
+
+
+def test_production_regression_weak_three_lot_cluster_is_hidden(db):
+    """Engine run 2: n_lots=3, oecd {3.1.1: 0.77, 3.3.3: 0.7, 3.3.7: 0.27}, p=0.950 went to
+    review. With the gate it is hidden, also when publication is allowed."""
+    _, run_id = _weak_setup(db, n_lots=3)
+    counts = upsert_signals(db, run_id, ItemJev(PROD_EXAMPLE), max_status="published")
+    (s,) = _signals(db)
+    assert set(s["oecd"]) == set(PROD_EXAMPLE)
+    assert s["oecd"] == pytest.approx(PROD_EXAMPLE)
+    assert s["probability"] == pytest.approx(0.95, abs=0.001)
+    assert s["status"] == "hidden"
+    assert s["evidence"]["n_lots"] == 3
+    assert s["evidence"]["decision"]["gate"] == GATE_MIN_LOTS
+    assert counts["hidden"] == 1 and counts["review"] == 0
+    assert counts["gates"] == {GATE_MIN_LOTS: 1}
+
+
+def test_weak_only_cluster_with_enough_lots_stays_in_review(db):
+    _, run_id = _weak_setup(db, n_lots=30)
+    upsert_signals(db, run_id, ItemJev({"3.1.1": 0.95, "3.3.3": 0.9, "3.3.7": 0.9}),
+                   max_status="published")
+    (s,) = _signals(db)
+    assert s["probability"] >= 0.91
+    assert s["status"] == "review"
+    assert s["evidence"]["decision"]["gate"] == GATE_WEAK_ONLY
+
+
+def test_cluster_at_a_single_buyer_is_hidden(db):
+    m, run_id = _setup(db)
+    db.execute(
+        "update procedures set buyer_id = %s where ocds_id in"
+        " (select procedure_id from lots where id = any(%s))",
+        (m["buyers"][0], list(m["cartel_lots"])),
+    )
+    db.commit()
+    upsert_signals(db, run_id, FakeJev(noul=0.9), max_status="published")
+    (s,) = _signals(db)
+    assert s["evidence"]["n_buyers"] == 1
+    assert s["status"] == "hidden"
+    assert s["evidence"]["decision"]["gate"] == GATE_MIN_BUYERS
+
+
+def test_min_lots_from_environment(db, monkeypatch):
+    monkeypatch.setenv("ENGINE_MIN_LOTS", "1000")
+    _, run_id = _setup(db)
+    counts = upsert_signals(db, run_id, FakeJev(noul=0.9), max_status="published")
+    assert counts["hidden"] == 1 and counts["gates"] == {GATE_MIN_LOTS: 1}
+    # An explicit argument wins over the environment.
+    m2 = upsert_signals(db, run_id, FakeJev(noul=0.9), max_status="published", min_lots=8)
+    assert m2["published"] == 1 and "gates" not in m2
+
+
+def test_signal_evidence_carries_the_market_id(db):
+    """`signals.evidence->>'market_id'` was empty for every signal in production."""
+    _, run_id = _setup(db)
+    upsert_signals(db, run_id, FakeJev(noul=0.9))
+    row = db.execute(
+        "select s.market_id, s.evidence->>'market_id' as ev_market,"
+        " s.evidence->>'market_label' as label, c.market_id as cluster_market"
+        " from signals s join clusters c on c.cluster_id = s.cluster_id and c.run_id = s.run_id"
+    ).fetchone()
+    assert row["ev_market"] == row["cluster_market"] == row["market_id"]
+    assert row["ev_market"] == "cpv5_prov:45210:30"
+    assert row["label"] == "CPV 45210 · wielkopolskie"

@@ -62,6 +62,32 @@ published only when Jev (never the fallback) gives a combined probability of at 
 from its three strongest OECD items, the strongest item at least 0.8 and at least two items
 at least 0.6. The value used is recorded in `engine_runs.params->>'max_status'`.
 
+Minimum evidence gate (applied after the thresholds, it only lowers a status):
+
+- `ENGINE_MIN_LOTS` (in `infra/.env`, default 8): a cluster with fewer common lots
+  (`clusters.n_lots`), or whose lots come from fewer than 2 different buyers, is at most
+  `hidden`. The value used is recorded in `engine_runs.params->>'min_lots'`.
+- Strong and weak OECD items: a cluster is at most `review` unless at least one strong item
+  fired, i.e. is present in the evidence, has a decision probability of at least 0.6 and,
+  for 3.3.10, no `signal = false` flag. Strong items: 3.1.6 (rotation), 3.3.6 (price
+  pattern), 3.2.11 (shared account or address), 3.1.2 (territorial split), 3.3.10 (price
+  drop after entry), 3.3.5 (identical prices). Weak items: 3.1.1 (frequent winner), 3.3.3
+  (small discounts), 3.3.9 (price above estimate), 3.1.5 (always bids, never wins), 3.3.7
+  (gap between winner and losers). Weak items alone never publish a signal, even with
+  `ENGINE_MAX_STATUS=published`.
+
+The outcome is stored per signal in `signals.evidence->'decision'->>'gate'`: `ok`,
+`min_lots`, `min_buyers` or `weak_only`; run counts carry `"gates": {"min_lots": n, ...}`
+for the non-`ok` outcomes. `signals.evidence` also has the market at the top level
+(`market_id`, `market_label` such as `CPV 45210 · wielkopolskie`, and `n_buyers`):
+
+```sql
+select status, evidence->'decision'->>'gate' gate, evidence->>'market_label' market,
+       (evidence->>'n_lots')::int n_lots, (evidence->>'n_buyers')::int n_buyers,
+       probability, oecd
+from signals order by probability desc limit 20;
+```
+
 Jev errors: an HTTP 4xx other than 429 (rejected key, wrong request shape, unknown model)
 turns Jev off for the rest of the run after the first call; the error and the start of the
 response body are logged once, the remaining clusters get the fallback, and the reason is

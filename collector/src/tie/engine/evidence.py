@@ -21,8 +21,10 @@ Kształt pakietu:
 
     {
       "cluster_id": "...", "market": {"market_id", "cpv_group", "province", "level", "n_lots"},
+      "market_id": "cpv5_prov:45210:PL30",                    # to samo co market.market_id
+      "market_label": "CPV 45210 · wielkopolskie",            # albo "CPV 452 · cała Polska"
       "members": [{"key": "A", "bidder_id": 123}, ...],      # posortowane po bidder_id
-      "n_lots": 30, "n_procedures": 30, "total_value": 1234567.89,
+      "n_lots": 30, "n_procedures": 30, "n_buyers": 7, "total_value": 1234567.89,
       "period": {"from": "2023-03-15", "to": "2025-11-20"},
       "oecd": {
         "3.1.6": {"level": "pair", "value": 0.93, "pct": 0.98, "n": 3,
@@ -40,6 +42,9 @@ z percentylem co najmniej 0.9, a `mean` średnia wartość. Gdy test zapisuje w 
 flagę `signal` (3.3.10), punkt ma pole `signal` najsilniejszej encji, a encje w `top` pole `s`;
 wynik całego rynku (`rynek`) jest wybierany tylko wtedy, gdy nie ma wyniku klastra.
 `winner` w części to klucz członka, `inny` dla zwycięzcy spoza klastra albo null.
+`n_buyers` to liczba różnych zamawiających w częściach klastra (bramka minimalnych dowodów
+w `tie.engine.decide`). `market_id` i `market_label` na najwyższym poziomie są dla
+recenzentów (`signals.evidence->>'market_id'`); nie wchodzą do `evidence_hash`.
 """
 
 from __future__ import annotations
@@ -54,6 +59,7 @@ from typing import Any
 
 import psycopg
 
+from tie.engine.explain import PROVINCES
 from tie.engine.oecd import CATALOG
 from tie.engine.tests_firm import firm_key
 from tie.engine.tests_pair import pair_key
@@ -123,6 +129,19 @@ def evidence_hash(evidence: dict) -> str:
         canonical_json(decision_package(evidence)).encode("utf-8")).hexdigest()
 
 
+def market_label(cpv_group: str | None, province: str | None) -> str | None:
+    """Etykieta rynku dla recenzenta: `CPV 45210 · wielkopolskie` albo
+    `CPV 452 · cała Polska` (rynek bez województwa)."""
+    if not cpv_group:
+        return None
+    code = str(province or "").strip().upper()
+    if code in ("", "PL"):
+        return f"CPV {cpv_group} · cała Polska"
+    if not code.startswith("PL"):
+        code = "PL" + code.zfill(2)
+    return f"CPV {cpv_group} · {PROVINCES.get(code, str(province))}"
+
+
 def _key(i: int) -> str:
     """A, B, ..., Z, AA, AB, ... dla kolejnych członków."""
     out = ""
@@ -178,7 +197,7 @@ def _cluster_lots(conn: psycopg.Connection, market_id: str, members: list[int]) 
         " join lot_market lm on lm.lot_id = b.lot_id and lm.market_id = %(market)s"
         " where b.bidder_id = any(%(members)s::bigint[])"
         " group by b.lot_id having count(distinct b.bidder_id) >= 2)"
-        " select l.id as lot_id, l.procedure_id, l.price_winner, l.estimated_value,"
+        " select l.id as lot_id, l.procedure_id, p.buyer_id, l.price_winner, l.estimated_value,"
         "  l.contract_value, l.winner_bidder_id, l.n_offers, mb.member_ids,"
         "  coalesce(l.contract_date, p.published_at::date) as day"
         " from mb join lots l on l.id = mb.lot_id"
@@ -327,19 +346,26 @@ def build_evidence(conn: psycopg.Connection, run_id: int, cluster_id: str) -> di
     )
     rows = _test_rows(conn, run_id, cluster_id, market_id, members,
                       [r["lot_id"] for r in lots])
+    # Bez wiersza `markets` grupa CPV i województwo z identyfikatora `poziom:grupa:woj`.
+    parts = (market_id or "").split(":")
+    cpv_group = market["cpv_group"] if market else (parts[1] if len(parts) > 1 else None)
+    province = market["province"] if market else (parts[2] if len(parts) > 2 else None)
 
     evidence = {
         "cluster_id": cluster_id,
+        "market_id": market_id,
+        "market_label": market_label(cpv_group, province),
         "market": {
             "market_id": market_id,
-            "cpv_group": market["cpv_group"] if market else None,
-            "province": market["province"] if market else None,
+            "cpv_group": cpv_group,
+            "province": province,
             "level": market["level"] if market else None,
             "n_lots": market["n_lots"] if market else None,
         },
         "members": [{"key": key_of[m], "bidder_id": m} for m in members],
         "n_lots": cluster["n_lots"] if cluster["n_lots"] is not None else len(lots),
         "n_procedures": len({r["procedure_id"] for r in lots}),
+        "n_buyers": len({r["buyer_id"] for r in lots if r["buyer_id"] is not None}),
         "total_value": _num(total, 2),
         "period": {
             "from": min(days).isoformat() if days else None,
