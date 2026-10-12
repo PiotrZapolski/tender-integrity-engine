@@ -26,7 +26,7 @@ from tie.config import Settings
 from tie.db import connect
 from tie.ezam.documents import download_document, sync_documents
 from tie.http import PoliteClient
-from tie.identity.bidders import resolve_unmatched_bids
+from tie.identity.bidders import UNMATCHED_SQL, resolve_unmatched_bids
 from tie.identity.whitelist import enrich_bidders
 from tie.jobs import MAX_ERROR_LEN, claim, complete, enqueue, fail
 from tie.openings.store import process_opening_document
@@ -137,12 +137,13 @@ def _identity(ctx: Context, payload: dict) -> None:
         raise RuntimeError("JEV_API_KEY not set")
     deadline = time.monotonic() + IDENTITY_TIME_LIMIT_S
     # Bids that failed in this run (logged by resolve_unmatched_bids) are not retried until
-    # the next identity job, so one bad bid cannot stall the rest.
+    # the next identity job, so one bad bid cannot stall the rest. Bids that failed in 3 runs
+    # (identity_failures) are excluded altogether.
     skip: set[int] = set()
 
     def unmatched() -> int:
         n = ctx.conn.execute(
-            "select count(*) n from bids where bidder_id is null"
+            f"select count(*) n from bids where {UNMATCHED_SQL}"
             " and not (id = any(%s::bigint[]))", (list(skip),)).fetchone()["n"]
         ctx.conn.commit()
         return n

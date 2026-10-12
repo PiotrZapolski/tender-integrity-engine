@@ -15,6 +15,7 @@ import psycopg
 from tie.config import load_settings
 from tie.db import connect, migrate
 from tie.handlers import Context, run_once
+from tie.identity.bidders import MAX_IDENTITY_FAILURES
 from tie.jobs import enqueue, requeue_stale
 
 log = logging.getLogger("tie.cli")
@@ -130,11 +131,15 @@ def _stats(conn: psycopg.Connection) -> dict:
         "select coalesce(sum(cost_usd), 0) s from ai_calls"
         " where created_at >= date_trunc('day', now())").fetchone()["s"]
     checked = sum(documents.get(s, 0) for s in ("parsed", "mismatch", "needs_review"))
+    excluded = conn.execute(
+        "select count(*) n from bids where identity_failures >= %s",
+        (MAX_IDENTITY_FAILURES,)).fetchone()["n"]
     conn.commit()
     return {
         "procedures": count("procedures"),
         "lots": count("lots"),
         "bids": count("bids"),
+        "bids_identity_excluded": excluded,
         "bidders": count("bidders"),
         "documents": documents,
         "mismatch_share": round(documents.get("mismatch", 0) / checked, 4) if checked else None,

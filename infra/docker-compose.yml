@@ -30,7 +30,8 @@ services:
     mem_limit: 8g
     restart: unless-stopped
     # Let the current job finish on deploy instead of SIGKILL after Docker's default 10 s.
-    stop_grace_period: 120s
+    # An identity job runs up to 10 minutes before it queues a continuation.
+    stop_grace_period: 15m
   cron:
     build: ../collector
     image: tie-collector

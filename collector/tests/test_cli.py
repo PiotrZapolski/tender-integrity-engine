@@ -74,6 +74,22 @@ def test_stats(db, dburl, capsys):
     assert out["lots"] == 0 and out["bids"] == 0 and out["documents"] == {}
     assert out["jobs"] == {"bzp_day": {"queued": 1}}
     assert out["ai_cost_today_usd"] == 0
+    assert out["bids_identity_excluded"] == 0
+
+
+def test_stats_counts_identity_excluded_bids(db, dburl, capsys):
+    db.execute("insert into procedures(ocds_id, bzp_number, notice_number, title, published_at)"
+               " values ('o','b','n','t', now())")
+    lot = db.execute("insert into lots(procedure_id, lot_no, outcome) values ('o',1,'umowa')"
+                     " returning id").fetchone()["id"]
+    for offer_no, fails in enumerate([0, 2, 3, 5], start=1):
+        db.execute("insert into bids(lot_id, offer_no, bidder_name_raw, parse_method,"
+                   " identity_failures) values (%s, %s, 'x', 'llm', %s)",
+                   (lot, offer_no, fails))
+    db.commit()
+    assert cli.main(["stats"]) == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["bids"] == 4 and out["bids_identity_excluded"] == 2
 
 
 def test_migrate(db, dburl):
