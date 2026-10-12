@@ -50,8 +50,12 @@ _ROWS: list[tuple[str, str, str, str]] = [
      "liczba odrzuconych z BZP, imiennie z informacji o wyborze"),
     # 3.2 Dokumentacja przetargowa
     ("3.2.1", "Identyczne błędy w ofertach", "N", "treść ofert niepubliczna"),
-    ("3.2.2", "Identyczny format, metadane, adres IP", "N", "j.w."),
-    ("3.2.3", "Ta sama osoba składa oferty konkurentów", "N", "j.w.; pośrednio 3.2.11"),
+    ("3.2.2", "Identyczny format, metadane, adres IP", "N",
+     "Pliki ofert nie są publiczne, więc nie da się porównać ich formatu, metadanych"
+     " ani adresów IP."),
+    ("3.2.3", "Ta sama osoba składa oferty konkurentów", "N",
+     "Pliki ofert nie są publiczne, więc nie widać, kto je składa; pośrednio wskazuje"
+     " na to punkt 3.2.11 (wspólny adres lub rachunek)."),
     ("3.2.4", "Oferta używa danych innego oferenta (adres, e-mail, telefon)", "C",
      "wspólne dane kontaktowe z KRS, CEIDG i otwarć"),
     ("3.2.5", "Oferty niekompletne mimo wcześniej kompletnych", "C",
@@ -59,16 +63,22 @@ _ROWS: list[tuple[str, str, str, str]] = [
     ("3.2.6", "Identyczne szacunki kosztów lub warunki dodatkowe", "C",
      "identyczne wartości kryteriów pozacenowych, jeśli są w otwarciu"),
     ("3.2.7", "Podobne poprawki", "N", "treść ofert niepubliczna"),
-    ("3.2.8", "Oferty mniej szczegółowe, nieautentyczne", "N", "j.w."),
+    ("3.2.8", "Oferty mniej szczegółowe, nieautentyczne", "N",
+     "Treść ofert nie jest publiczna, więc nie da się ocenić ich szczegółowości"
+     " ani autentyczności."),
     ("3.2.9", "Oferty składane razem lub w krótkim odstępie", "C",
      "jeśli czas złożenia jest w raporcie z otwarcia"),
-    ("3.2.10", "Stała kolejność składania ofert", "C", "j.w."),
+    ("3.2.10", "Stała kolejność składania ofert", "C",
+     "Kolejność składania ofert sprawdzamy, jeśli raport z otwarcia podaje czas złożenia"
+     " każdej oferty."),
     ("3.2.11", "Ten sam adres lub siedziba, wspólne zobowiązania", "A",
      "adresy, wspólne osoby i wspólnicy w KRS; broker niedostępny"),
     # 3.3 Ceny
     ("3.3.1", "Nagłe lub identyczne podwyżki", "C",
      "indeks cen względem szacunku w rynku, skoki wspólne dla grupy"),
-    ("3.3.2", "Oczekiwane obniżki znikają", "C", "j.w., odchylenie od trendu rynku"),
+    ("3.3.2", "Oczekiwane obniżki znikają", "C",
+     "Porównujemy indeks cen względem szacunku w rynku z trendem rynku i szukamy grup,"
+     " u których spodziewany spadek cen nie następuje."),
     ("3.3.3", "Obniżki mniejsze niż typowe", "A",
      "stosunek ceny zwycięskiej do szacunku na tle rynku"),
     ("3.3.4", "Ceny niezmienne mimo zmian rynku", "C",

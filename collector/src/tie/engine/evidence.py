@@ -2,9 +2,20 @@
 
 Pakiet zawiera wyłącznie `bidder_id` członków (nigdy nazw firm: JDG maskują widoki `api.*`),
 rynek, liczbę części, okres, wyniki testów OECD (A/C) z `test_results` dla klastra, jego par,
-członków i części oraz do 20 przykładowych części. Wszystko, co trafia do pakietu, jest
-deterministyczne i niezależne od `run_id`, więc `evidence_hash` zmienia się tylko wtedy, gdy
-zmieniły się dane. Kanoniczny JSON pakietu ma najwyżej 6000 znaków.
+członków i części oraz do 20 przykładowych części. Kanoniczny JSON pakietu ma najwyżej 6000
+znaków.
+
+`evidence_hash` nie liczy się z całego pakietu, tylko ze zgrubnego "pakietu decyzji"
+(`decision_package`): klaster, zbiór członków, zbiór obecnych punktów OECD
+(`present_items`), ich percentyle zaokrąglone do 0.05 i flagi `signal`. Okno 36 miesięcy
+przesuwa się co dzień, więc liczności rynku i percentyle drgają z nocy na noc; takie drgania
+nie zmieniają hasha, a decyzja Jev i opis zostają ponownie użyte. Pełny pakiet i tak trafia
+do `signals.evidence`.
+
+Punkty obecne (`present_items`): wiersze 3.2.11 i 3.3.5 z wartością 0 w ogóle nie trafiają
+do pakietu (brak wspólnych danych, brak identycznych cen to brak sygnału, a nie słaby
+sygnał); punkty zero-jedynkowe i zliczeniowe (`FLAG_ITEMS`) są obecne, gdy wartość > 0,
+pozostałe tylko z percentylem (null = za mało obserwacji w rynku, model ich nie dostaje).
 
 Kształt pakietu:
 
@@ -44,6 +55,8 @@ from typing import Any
 import psycopg
 
 from tie.engine.oecd import CATALOG
+from tie.engine.tests_firm import firm_key
+from tie.engine.tests_pair import pair_key
 
 MAX_CHARS = 6000
 MAX_LOTS = 20
@@ -54,15 +67,60 @@ CHECKED = {c.item: c.status for c in CATALOG if c.status in ("A", "C")}
 # Testy, w których niższa wartość oznacza silniejszy sygnał (gdy brak percentyla).
 LOWER_IS_STRONGER = {"3.3.6", "3.3.10"}
 OTHER_WINNER = "inny"
+# Testy zero-jedynkowe: wiersz z wartością 0 to brak sygnału, nie trafia do pakietu.
+ZERO_IS_ABSENT = {"3.2.11", "3.3.5"}
+# Punkty bez rozkładu (flaga 0/1 albo liczba zdarzeń): obecne, gdy wartość > 0.
+FLAG_ITEMS = {"3.2.11", "3.3.5", "3.1.7"}
+# Krok zaokrąglenia percentyli w pakiecie decyzji (hash).
+HASH_PCT_STEP = 0.05
 
 
 def canonical_json(obj: Any) -> str:
     return json.dumps(obj, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
 
 
+def present_items(evidence: dict) -> dict[str, dict]:
+    """Punkty OECD pakietu, które są sygnałem do oceny: A/C, dla `FLAG_ITEMS` wartość > 0,
+    dla pozostałych percentyl różny od null."""
+    out: dict[str, dict] = {}
+    for item, numbers in (evidence.get("oecd") or {}).items():
+        if item not in CHECKED or not isinstance(numbers, dict):
+            continue
+        if item in FLAG_ITEMS:
+            value = numbers.get("value")
+            if value is None or float(value) <= 0:
+                continue
+        elif numbers.get("pct") is None:
+            continue
+        out[item] = numbers
+    return out
+
+
+def _coarse(pct: Any) -> float | None:
+    if pct is None:
+        return None
+    return round(round(float(pct) / HASH_PCT_STEP) * HASH_PCT_STEP, 2)
+
+
+def decision_package(evidence: dict) -> dict:
+    """Zgrubna treść decyzji: klaster, członkowie, obecne punkty, percentyle co 0.05, flagi."""
+    items = {}
+    for item, numbers in present_items(evidence).items():
+        entry: dict[str, Any] = {"pct": _coarse(numbers.get("pct"))}
+        if numbers.get("signal") is not None:
+            entry["signal"] = numbers["signal"]
+        items[item] = entry
+    return {
+        "cluster_id": evidence.get("cluster_id"),
+        "members": sorted(int(m["bidder_id"]) for m in evidence.get("members") or []),
+        "items": items,
+    }
+
+
 def evidence_hash(evidence: dict) -> str:
-    """sha256 kanonicznego JSON pakietu (klucze posortowane, bez spacji)."""
-    return hashlib.sha256(canonical_json(evidence).encode("utf-8")).hexdigest()
+    """sha256 kanonicznego JSON pakietu decyzji (`decision_package`) danego pakietu dowodów."""
+    return hashlib.sha256(
+        canonical_json(decision_package(evidence)).encode("utf-8")).hexdigest()
 
 
 def _key(i: int) -> str:
@@ -130,20 +188,28 @@ def _cluster_lots(conn: psycopg.Connection, market_id: str, members: list[int]) 
     ).fetchall()
 
 
-def _test_rows(conn: psycopg.Connection, run_id: int, cluster_id: str,
-               market_id: str) -> list[dict]:
+def _test_rows(conn: psycopg.Connection, run_id: int, cluster_id: str, market_id: str,
+               members: list[int], lot_ids: list[int]) -> list[dict]:
+    """Wiersze testów klastra: tylko encje klastra (członkowie, pary członków, części
+    klastra, sam klaster) i wynik całego rynku, wybrane po kluczu (indeks PK), a nie cały
+    rynek przefiltrowany w Pythonie."""
+    firms = [firm_key(m, market_id) for m in members]
+    pairs = [pair_key(a, b, market_id)
+             for i, a in enumerate(members) for b in members[i + 1:]]
     return conn.execute(
         "select test_id, level, entity_key, market_id, value, percentile, n_obs,"
         "  case when jsonb_typeof(evidence -> 'signal') = 'boolean'"
         "   then (evidence ->> 'signal')::boolean end as signal"
         " from test_results"
         " where run_id = %(run)s and test_id = any(%(items)s) and ("
-        "  (level = 'cluster' and position(%(cid)s in entity_key) > 0)"
-        "  or (level = 'market' and (entity_key = %(market)s or market_id = %(market)s))"
-        "  or (level in ('pair', 'firm', 'lot')"
-        "      and (market_id = %(market)s or market_id is null)))"
+        "  (level = 'cluster' and entity_key = %(cid)s)"
+        "  or (level = 'market' and entity_key = %(market)s)"
+        "  or (level = 'firm' and entity_key = any(%(firms)s))"
+        "  or (level = 'pair' and entity_key = any(%(pairs)s))"
+        "  or (level = 'lot' and entity_key = any(%(lots)s)))"
         " order by test_id, level, entity_key",
-        {"run": run_id, "items": list(CHECKED), "cid": cluster_id, "market": market_id},
+        {"run": run_id, "items": list(CHECKED), "cid": cluster_id, "market": market_id,
+         "firms": firms, "pairs": pairs, "lots": [str(i) for i in lot_ids]},
     ).fetchall()
 
 
@@ -155,6 +221,8 @@ def _oecd(rows: list[dict], market_id: str, key_of: dict[int, str],
     for r in rows:
         test_id, level = r["test_id"], r["level"]
         value, pct = _num(r["value"]), _num(r["percentile"])
+        if test_id in ZERO_IS_ABSENT and (value is None or value <= 0):
+            continue
         ids = _ids(r["entity_key"], r["market_id"] or market_id)
         if level == "cluster":
             label = "klaster"
@@ -257,7 +325,8 @@ def build_evidence(conn: psycopg.Connection, run_id: int, cluster_id: str) -> di
         or Decimal(0)
         for r in lots
     )
-    rows = _test_rows(conn, run_id, cluster_id, market_id)
+    rows = _test_rows(conn, run_id, cluster_id, market_id, members,
+                      [r["lot_id"] for r in lots])
 
     evidence = {
         "cluster_id": cluster_id,

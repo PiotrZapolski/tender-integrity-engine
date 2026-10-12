@@ -3,8 +3,11 @@
 - 3.1.1 the same supplier wins often: the firm's share of the market's lots with a winner
   (only in markets with at least `MIN_MARKET_LOTS` such lots).
 - 3.1.5 always bids, never wins: the number of starts of a firm with no win, stored only when
-  the firm has at least `NEVER_WIN_STARTS` starts and 0 wins (value 0 for the other firms of
-  the market, which still count in the distribution for the percentile).
+  the firm has at least `NEVER_WIN_STARTS` starts, 0 wins and a cover-bid shape: in at least
+  half of its starts its valid offer (cross-checked document, not outside the BZP range,
+  after `price_scale`) is within `COVER_GAP` (10%) of the winning price. A firm that simply
+  loses by a wide margin is an honest loser, not a cover bidder. The other firms of the
+  market get value 0 and still count in the distribution for the percentile.
 - 3.3.3 smaller discounts than usual: the median `price_winner / estimated_value` over the
   firm's wins (at least `MIN_WINS_RATIO` wins with a positive estimate), against the market.
 
@@ -31,6 +34,8 @@ from tie.engine.tests_lot import Observation, write_results
 MIN_STARTS = 2
 MIN_MARKET_LOTS = 10
 NEVER_WIN_STARTS = 8
+# A losing offer at most this much above the winning price has the shape of a cover bid.
+COVER_GAP = 0.10
 MIN_WINS_RATIO = 2
 FIRM_TESTS = ("3.1.1", "3.1.5", "3.3.3")
 
@@ -50,7 +55,9 @@ def compute_firm_tests(conn: psycopg.Connection, run_id: int) -> int:
         (run_id,),
     ).fetchall()
     bid_starts = conn.execute(
-        "select distinct lm.market_id, b.bidder_id, b.lot_id"
+        "select lm.market_id, b.bidder_id, b.lot_id,"
+        "  case when b.outside_bzp_range is not true and b.price > 0"
+        "   then b.price * b.price_scale end as price"
         " from bids b"
         " join lot_market lm on lm.lot_id = b.lot_id"
         " join documents d on d.id = b.document_id"
@@ -63,8 +70,16 @@ def compute_firm_tests(conn: psycopg.Connection, run_id: int) -> int:
     win_ratios: dict[str, dict[int, list[float]]] = defaultdict(lambda: defaultdict(list))
     market_ratios: dict[str, list[float]] = defaultdict(list)
     won_lots: dict[str, int] = defaultdict(int)
+    # (market, bidder) -> lot -> lowest valid offer price
+    offers: dict[tuple[str, int], dict[int, float]] = defaultdict(dict)
     for b in bid_starts:
         starts[b["market_id"]][b["bidder_id"]].add(b["lot_id"])
+        if b["price"] is not None:
+            prices = offers[(b["market_id"], b["bidder_id"])]
+            price = float(b["price"])
+            prices[b["lot_id"]] = min(price, prices.get(b["lot_id"], price))
+    winning_price = {lot["id"]: float(lot["price_winner"]) for lot in lots
+                     if lot["price_winner"] is not None and lot["price_winner"] > 0}
     for lot in lots:
         market, winner = lot["market_id"], lot["winner_bidder_id"]
         est, price = lot["estimated_value"], lot["price_winner"]
@@ -97,8 +112,16 @@ def compute_firm_tests(conn: psycopg.Connection, run_id: int) -> int:
                     "3.1.1", key, market, n_wins / n_won, {**base, "market_lots_won": n_won},
                 ))
             never = n_wins == 0 and n_starts >= NEVER_WIN_STARTS
+            close = 0
+            if never:
+                close = sum(
+                    1 for lot_id, p in offers.get((market, bidder), {}).items()
+                    if lot_id in winning_price and p <= winning_price[lot_id] * (1 + COVER_GAP)
+                )
+                never = 2 * close >= n_starts
             observations.append(Observation(
-                "3.1.5", key, market, float(n_starts) if never else 0.0, base, store=never,
+                "3.1.5", key, market, float(n_starts) if never else 0.0,
+                {**base, "close_losses": close} if never else base, store=never,
             ))
             ratios = win_ratios[market].get(bidder, [])
             if len(ratios) >= MIN_WINS_RATIO:
