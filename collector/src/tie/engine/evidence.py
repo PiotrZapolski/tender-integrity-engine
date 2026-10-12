@@ -25,8 +25,10 @@ Kształt pakietu:
 Znaczenie pól OECD: `value` i `pct` to wynik i percentyl w rynku najsilniejszej encji
 (dla części: mediany po częściach klastra), `n` liczba encji z wynikiem, `top` encje
 (`klaster`, `rynek`, klucz członka `A` albo pary `A-B`), dla części `high` to liczba części
-z percentylem co najmniej 0.9, a `mean` średnia wartość. `winner` w części to klucz członka,
-`inny` dla zwycięzcy spoza klastra albo null.
+z percentylem co najmniej 0.9, a `mean` średnia wartość. Gdy test zapisuje w `evidence`
+flagę `signal` (3.3.10), punkt ma pole `signal` najsilniejszej encji, a encje w `top` pole `s`;
+wynik całego rynku (`rynek`) jest wybierany tylko wtedy, gdy nie ma wyniku klastra.
+`winner` w części to klucz członka, `inny` dla zwycięzcy spoza klastra albo null.
 """
 
 from __future__ import annotations
@@ -90,12 +92,21 @@ def _ids(entity_key: str, market_id: str | None) -> list[int]:
     return [int(t) for t in re.findall(r"\d+", entity_key)]
 
 
-def _strength(test_id: str, pct: float | None, value: float | None) -> tuple[float, float]:
-    """Klucz sortowania encji od najsilniejszego sygnału: najpierw percentyl, potem wartość."""
+def _strength(test_id: str, ent: tuple) -> tuple:
+    """Klucz sortowania encji od najsilniejszego sygnału: encje klastra, par i członków przed
+    całym rynkiem, encje z flagą `signal = false` na końcu, potem percentyl, potem wartość."""
+    level, _, value, pct, signal = ent
     v = 0.0 if value is None else float(value)
     if test_id in LOWER_IS_STRONGER:
         v = -v
-    return (-1.0 if pct is None else float(pct), v)
+    return (level != "market", signal is not False, -1.0 if pct is None else float(pct), v)
+
+
+def _top(ent: tuple) -> dict:
+    top = {"e": ent[1], "v": ent[2], "p": ent[3]}
+    if ent[4] is not None:
+        top["s"] = ent[4]
+    return top
 
 
 def _cluster_lots(conn: psycopg.Connection, market_id: str, members: list[int]) -> list[dict]:
@@ -122,7 +133,9 @@ def _cluster_lots(conn: psycopg.Connection, market_id: str, members: list[int]) 
 def _test_rows(conn: psycopg.Connection, run_id: int, cluster_id: str,
                market_id: str) -> list[dict]:
     return conn.execute(
-        "select test_id, level, entity_key, market_id, value, percentile, n_obs"
+        "select test_id, level, entity_key, market_id, value, percentile, n_obs,"
+        "  case when jsonb_typeof(evidence -> 'signal') = 'boolean'"
+        "   then (evidence ->> 'signal')::boolean end as signal"
         " from test_results"
         " where run_id = %(run)s and test_id = any(%(items)s) and ("
         "  (level = 'cluster' and position(%(cid)s in entity_key) > 0)"
@@ -137,7 +150,7 @@ def _test_rows(conn: psycopg.Connection, run_id: int, cluster_id: str,
 def _oecd(rows: list[dict], market_id: str, key_of: dict[int, str],
           lot_ids: set[int]) -> dict[str, dict]:
     """Wyniki testów przypisane do klastra, zagregowane per punkt OECD."""
-    entities: dict[str, list[tuple[str, str, float | None, float | None]]] = {}
+    entities: dict[str, list[tuple]] = {}
     lots: dict[str, list[tuple[float | None, float | None]]] = {}
     for r in rows:
         test_id, level = r["test_id"], r["level"]
@@ -160,16 +173,17 @@ def _oecd(rows: list[dict], market_id: str, key_of: dict[int, str],
                 continue
             lots.setdefault(test_id, []).append((value, pct))
             continue
-        entities.setdefault(test_id, []).append((level, label, value, pct))
+        entities.setdefault(test_id, []).append((level, label, value, pct, r["signal"]))
 
     out: dict[str, dict] = {}
     for test_id, ents in entities.items():
-        ents.sort(key=lambda e: _strength(test_id, e[3], e[2]), reverse=True)
-        level, _, value, pct = ents[0]
-        out[test_id] = {
-            "level": level, "value": value, "pct": pct, "n": len(ents),
-            "top": [{"e": e[1], "v": e[2], "p": e[3]} for e in ents[:MAX_TOP]],
-        }
+        ents.sort(key=lambda e: _strength(test_id, e), reverse=True)
+        level, _, value, pct, signal = ents[0]
+        item = {"level": level, "value": value, "pct": pct, "n": len(ents),
+                "top": [_top(e) for e in ents[:MAX_TOP]]}
+        if signal is not None:
+            item["signal"] = signal
+        out[test_id] = item
     for test_id, vals in lots.items():
         if test_id in out:
             continue

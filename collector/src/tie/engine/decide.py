@@ -179,6 +179,9 @@ def decide_cluster(decider: Decider, evidence: dict) -> Decision:
 
 
 def _fallback_input(item: str, numbers: dict) -> float:
+    # Test z własną flagą sygnału (3.3.10: spadek cen o więcej niż 10%) i flagą `false`.
+    if numbers.get("signal") is False:
+        return 0.0
     pct = numbers.get("pct")
     if pct is not None:
         return _clip(float(pct), 0.0, 1.0)

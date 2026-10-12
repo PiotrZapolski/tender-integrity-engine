@@ -3,6 +3,7 @@ import math
 from itertools import combinations
 
 import pytest
+from psycopg.types.json import Jsonb
 
 from tie.ai.providers import BudgetExceeded
 from tie.engine.decide import (
@@ -162,6 +163,15 @@ def test_fallback_logistic_formula():
     assert isinstance(d, Decision)
 
 
+def test_fallback_ignores_entry_test_without_signal():
+    base = {"3.1.6": {"pct": 1.0}}
+    no_drop = fallback_decision({"oecd": {**base, "3.3.10": {"pct": 0.95, "signal": False}}})
+    drop = fallback_decision({"oecd": {**base, "3.3.10": {"pct": 0.95, "signal": True}}})
+    assert no_drop.per_item["3.3.10"] == 0.0
+    assert drop.per_item["3.3.10"] == pytest.approx(0.95)
+    assert drop.probability > no_drop.probability
+
+
 def test_fallback_without_evidence_is_low():
     assert fallback_decision({"oecd": {}}).probability < 0.05
 
@@ -192,6 +202,22 @@ def test_build_evidence_for_cartel_cluster(db):
     assert "Firma Testowa" not in text and "Jan Testowy" not in text
     assert evidence_hash(ev) == evidence_hash(json.loads(text))
     assert len(evidence_hash(ev)) == 64
+
+
+def test_entry_test_prefers_cluster_row_and_keeps_signal_flag(db):
+    _, run_id = _setup(db)
+    market_id = "cpv5_prov:45210:30"
+    db.cursor().executemany(
+        "insert into test_results(run_id, test_id, level, entity_key, market_id, value,"
+        " percentile, n_obs, evidence) values (%s, '3.3.10', %s, %s, %s, %s, %s, 20, %s)",
+        [(run_id, "cluster", CLUSTER_ID, market_id, -0.02, 0.6, Jsonb({"signal": False})),
+         (run_id, "market", market_id, market_id, -0.3, 0.99, Jsonb({"signal": True}))],
+    )
+    db.commit()
+    item = build_evidence(db, run_id, CLUSTER_ID)["oecd"]["3.3.10"]
+    assert item["level"] == "cluster" and item["signal"] is False
+    assert item["value"] == pytest.approx(-0.02)
+    assert {t["e"]: t["s"] for t in item["top"]} == {"klaster": False, "rynek": True}
 
 
 def test_cartel_published_with_fake_jev(db):
