@@ -104,7 +104,7 @@ that need a missing key fail and can be requeued once the key is set. Keep exact
 | 2 | Engine: OECD test catalogue, tests, graph, Jev decision | planned |
 | 3 | Validation against UOKiK and KIO cases, threshold calibration | planned |
 | 4 | Web application zmowy.pl (separate repository) | planned |
-| 5 | More platforms: platformazakupowa.pl, ezamawiajacy.pl, logintrade | planned |
+| 5 | More platforms: ezamawiajacy.pl (procedure links from BZP); platformazakupowa.pl and logintrade block file downloads in robots.txt | in progress |
 
 ## Licenses
 

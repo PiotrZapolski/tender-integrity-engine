@@ -21,7 +21,9 @@ class HttpGiveUp(Exception):
 class PoliteClient:
     """Synchronous httpx wrapper used by every collector that calls public APIs.
 
-    `rates` maps a host to the minimal gap in seconds between two requests to it.
+    `rates` maps a host to the minimal gap in seconds between two requests to it. A key also
+    covers its subdomains, which then share one gap: `"ezamawiajacy.pl"` limits all
+    `*.ezamawiajacy.pl` hosts together (one platform behind many subdomains).
     Retries on RETRY_STATUSES and httpx.TransportError; other responses (including
     4xx other than 429) are returned as is. After `max_retries` retries raises HttpGiveUp.
     `retry_statuses_by_host` adds statuses retried only for a given host (for example 403
@@ -46,13 +48,25 @@ class PoliteClient:
         self.client = httpx.Client(headers={"User-Agent": user_agent}, timeout=timeout,
                                    follow_redirects=True)
 
+    def _bucket(self, host: str) -> str:
+        """The `rates` key that limits `host`: the host itself or its closest parent domain."""
+        if host in self.rates:
+            return host
+        parts = host.split(".")
+        for i in range(1, len(parts) - 1):
+            parent = ".".join(parts[i:])
+            if parent in self.rates:
+                return parent
+        return host
+
     def _wait_turn(self, host: str) -> None:
-        gap = self.rates.get(host, 0.0)
+        bucket = self._bucket(host)
+        gap = self.rates.get(bucket, 0.0)
         now = self.clock()
-        last = self._last.get(host)
+        last = self._last.get(bucket)
         if last is not None and gap > 0 and now - last < gap:
             self.sleep(gap - (now - last))
-        self._last[host] = self.clock()
+        self._last[bucket] = self.clock()
 
     def request(self, method: str, url: str, **kw) -> httpx.Response:
         host = urlparse(url).hostname or ""

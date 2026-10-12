@@ -35,7 +35,7 @@ def job(db, kind):
 
 def test_handlers_registered():
     assert {"bzp_day", "ezam_docs", "ezam_download", "opening_parse", "identity",
-            "whitelist"} <= set(HANDLERS)
+            "whitelist", "ezamawiajacy_docs", "ezamawiajacy_download"} <= set(HANDLERS)
 
 
 def test_backfill_enqueues_days(db, dburl):
