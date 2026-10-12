@@ -111,7 +111,8 @@ def run_engine(ctx, as_of: date, *, full: bool = False) -> dict:
     `review`), explanations use `ctx.text_provider` (DeepSeek; None keeps the template).
     """
     conn = ctx.conn
-    got = conn.execute("select pg_try_advisory_lock(%s) ok", (ENGINE_LOCK_KEY,)).fetchone()["ok"]
+    got = conn.execute("select pg_try_advisory_lock(%s) ok",
+                       (ENGINE_LOCK_KEY,)).fetchone()["ok"]
     conn.commit()
     if not got:
         raise EngineBusy("another engine run is in progress")
