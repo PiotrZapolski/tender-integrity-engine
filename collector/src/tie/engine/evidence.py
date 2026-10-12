@@ -11,7 +11,7 @@ Kształt pakietu:
     {
       "cluster_id": "...", "market": {"market_id", "cpv_group", "province", "level", "n_lots"},
       "members": [{"key": "A", "bidder_id": 123}, ...],      # posortowane po bidder_id
-      "n_lots": 30, "density": 1.0, "n_procedures": 30, "total_value": 1234567.89,
+      "n_lots": 30, "n_procedures": 30, "total_value": 1234567.89,
       "period": {"from": "2023-03-15", "to": "2025-11-20"},
       "oecd": {
         "3.1.6": {"level": "pair", "value": 0.93, "pct": 0.98, "n": 3,
@@ -222,7 +222,7 @@ def _fit(evidence: dict) -> dict:
 def build_evidence(conn: psycopg.Connection, run_id: int, cluster_id: str) -> dict:
     """Pakiet dowodów klastra `cluster_id` z przebiegu `run_id` (kształt w opisie modułu)."""
     cluster = conn.execute(
-        "select cluster_id, market_id, members, n_lots, density from clusters"
+        "select cluster_id, market_id, members, n_lots from clusters"
         " where run_id = %s and cluster_id = %s",
         (run_id, cluster_id),
     ).fetchone()
@@ -256,7 +256,6 @@ def build_evidence(conn: psycopg.Connection, run_id: int, cluster_id: str) -> di
         },
         "members": [{"key": key_of[m], "bidder_id": m} for m in members],
         "n_lots": cluster["n_lots"] if cluster["n_lots"] is not None else len(lots),
-        "density": _num(cluster["density"]),
         "n_procedures": len({r["procedure_id"] for r in lots}),
         "total_value": _num(total, 2),
         "period": {

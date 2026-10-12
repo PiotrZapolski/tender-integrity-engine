@@ -60,19 +60,19 @@ def _results(db, run_id, market_id, m, *, strong=True):
     hi = 0.97 if strong else 0.2
     rows = []
     for a, b in combinations(sorted(m["cartel"]), 2):
-        rows.append(("3.1.6", "pair", f"{a}:{b}", 0.95 if strong else 0.1, hi))
-        rows.append(("3.3.6", "pair", f"{a}:{b}", 0.02 if strong else 0.3, hi))
-        rows.append(("3.2.11", "pair", f"{a}:{b}", 0.0, None))
+        rows.append(("3.1.6", "pair", f"{a}-{b}|{market_id}", 0.95 if strong else 0.1, hi))
+        rows.append(("3.3.6", "pair", f"{a}-{b}|{market_id}", 0.02 if strong else 0.3, hi))
+        rows.append(("3.2.11", "pair", f"{a}-{b}|{market_id}", 0.0, None))
     for lot in m["cartel_lots"]:
         rows.append(("3.3.7", "lot", str(lot), 3.2 if strong else 0.5, hi))
     rows.append(("3.1.2", "cluster", CLUSTER_ID, 0.9 if strong else 0.1, hi))
     for f in m["cartel"]:
-        rows.append(("3.1.1", "firm", str(f), 0.3, hi))
+        rows.append(("3.1.1", "firm", f"{f}@{market_id}", 0.3, hi))
     # Outsiders: their results must not reach the cluster's evidence.
     o1, o2 = sorted(m["outsiders"])[:2]
-    rows.append(("3.1.1", "firm", str(o1), 0.9, 1.0))
-    rows.append(("3.1.6", "pair", f"{o1}:{o2}", 1.0, 1.0))
-    db.executemany(
+    rows.append(("3.1.1", "firm", f"{o1}@{market_id}", 0.9, 1.0))
+    rows.append(("3.1.6", "pair", f"{o1}-{o2}|{market_id}", 1.0, 1.0))
+    db.cursor().executemany(
         "insert into test_results(run_id, test_id, level, entity_key, market_id, value,"
         " percentile, n_obs) values (%s, %s, %s, %s, %s, %s, %s, 30)",
         [(run_id, t, lvl, key, market_id, v, p) for t, lvl, key, v, p in rows],
@@ -90,7 +90,7 @@ def _setup(db, *, seed=11, strong=True, market=None, run_id=None):
         " on conflict (market_id) do update set run_id = excluded.run_id",
         (market_id, len(m["lots"]), run_id),
     )
-    db.executemany(
+    db.cursor().executemany(
         "insert into lot_market(lot_id, market_id, run_id) values (%s, %s, %s)"
         " on conflict (lot_id) do update set run_id = excluded.run_id",
         [(lot, market_id, run_id) for lot in m["lots"]],
