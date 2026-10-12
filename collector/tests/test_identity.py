@@ -5,7 +5,7 @@ import httpx
 import pytest
 import respx
 
-from tie.ai.providers import BudgetExceeded
+from tie.ai.providers import BudgetExceeded, ProviderHttpError
 from tie.bzp.store import upsert_bidder
 from tie.handlers import HANDLERS, Context
 from tie.http import HttpGiveUp, PoliteClient
@@ -201,25 +201,91 @@ def test_identity_job_completes_despite_poison_bid(db):
     assert rows[good_id]["bidder_id"] == known
 
 
+def failures(db) -> dict[int, int]:
+    rows = db.execute("select id, identity_failures from bids").fetchall()
+    db.commit()
+    return {r["id"]: r["identity_failures"] for r in rows}
+
+
 def test_all_bids_failing_raises(db):
     seed_known_bidder(db)
-    seed_bids(db, [(POISON, None), (GOOD, None)])
+    ids = seed_bids(db, [(POISON, None), (GOOD, None)])
     with pytest.raises(RuntimeError, match="all 2 bids failed"):
         resolve_unmatched_bids(db, PoisonJev("0", 0.93, poison=(POISON, GOOD)))
+    # An outage must not mark good bids as poison.
+    assert failures(db) == {ids[0]: 0, ids[1]: 0}
+
+
+def test_failed_bid_counted_per_run_and_excluded_after_three(db):
+    known = seed_known_bidder(db)
+    poison_id, good_id = seed_bids(db, [(POISON, None), (GOOD, None)])
+    jev = PoisonJev("0", 0.93)
+    for run in range(1, 4):
+        # A separate run (identity job) starts with an empty skip set.
+        resolve_unmatched_bids(db, jev, skip=set())
+        assert failures(db)[poison_id] == run
+    assert jev.calls == [POISON, GOOD, POISON, POISON]
+    assert resolve_unmatched_bids(db, jev, skip=set()) == 0
+    assert jev.calls == [POISON, GOOD, POISON, POISON]
+    rows = {r["id"]: r for r in db.execute("select * from bids").fetchall()}
+    assert rows[poison_id]["bidder_id"] is None
+    assert rows[good_id]["bidder_id"] == known
+    # The identity job sees nothing left to do.
+    ctx = Context(conn=db, settings=None, client=PoliteClient("ua", {}, sleep=lambda s: None),
+                  rawstore=None, text_provider=None, decider=jev)
+    HANDLERS["identity"](ctx, {})
+    assert jev.calls == [POISON, GOOD, POISON, POISON]
+
+
+def test_previously_failed_batch_increments_without_raising(db):
+    seed_known_bidder(db)
+    ids = seed_bids(db, [(POISON, None), (GOOD, None)])
+    db.execute("update bids set identity_failures = 1")
+    db.commit()
+    jev = PoisonJev("0", 0.93, poison=(POISON, GOOD))
+    assert resolve_unmatched_bids(db, jev, skip=set()) == 0
+    assert failures(db) == {ids[0]: 2, ids[1]: 2}
+
+
+def test_fresh_bids_come_first(db):
+    seed_known_bidder(db)
+    old_id, fresh_id = seed_bids(db, [(POISON, None), (GOOD, None)])
+    db.execute("update bids set identity_failures = 1 where id = %s", (old_id,))
+    db.commit()
+    jev = PoisonJev("0", 0.93)
+    assert resolve_unmatched_bids(db, jev, limit=1, skip=set()) == 1
+    assert jev.calls == [GOOD]
+
+
+def http_error(status):
+    return ProviderHttpError("jev", status, f"jev request failed: HTTP {status}: no")
 
 
 @pytest.mark.parametrize("error", [
     BudgetExceeded("limit"),
     RuntimeError("jev request failed: status=503"),
+    http_error(401),
+    http_error(403),
 ])
 def test_budget_and_transport_errors_propagate(db, error):
-    if isinstance(error, RuntimeError):
+    if type(error) is RuntimeError:
         error.__cause__ = HttpGiveUp("https://jev", 503)
     seed_known_bidder(db)
-    seed_bids(db, [(POISON, None), (GOOD, None)])
+    ids = seed_bids(db, [(POISON, None), (GOOD, None)])
+    db.execute("update bids set identity_failures = 1")
+    db.commit()
     jev = PoisonJev("0", 0.93, error=error)
     with pytest.raises(type(error)):
         resolve_unmatched_bids(db, jev)
     assert jev.calls == [POISON]
     assert db.execute("select count(*) c from bids where bidder_id is not null"
                       ).fetchone()["c"] == 0
+    assert failures(db) == {ids[0]: 1, ids[1]: 1}
+
+
+def test_other_http_error_is_per_bid(db):
+    seed_known_bidder(db)
+    poison_id, _ = seed_bids(db, [(POISON, None), (GOOD, None)])
+    jev = PoisonJev("0", 0.93, error=http_error(422))
+    assert resolve_unmatched_bids(db, jev, skip=set()) == 1
+    assert failures(db)[poison_id] == 1

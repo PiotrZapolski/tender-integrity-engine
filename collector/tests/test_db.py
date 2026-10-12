@@ -21,6 +21,17 @@ def test_migrate_is_idempotent(db):
 
 def test_migrations_are_package_resources():
     assert resources.files("tie.migrations").joinpath("001_init.sql").is_file()
+    assert resources.files("tie.migrations").joinpath("002_identity_failures.sql").is_file()
+
+
+def test_migration_002_applied(db):
+    names = {r["name"] for r in db.execute("select name from schema_migrations").fetchall()}
+    assert "002_identity_failures.sql" in names
+    col = db.execute(
+        "select data_type, column_default, is_nullable from information_schema.columns"
+        " where table_name = 'bids' and column_name = 'identity_failures'").fetchone()
+    assert col["data_type"] == "smallint" and col["is_nullable"] == "NO"
+    assert col["column_default"] == "0"
 
 
 def test_pg_trgm_enabled(db):
