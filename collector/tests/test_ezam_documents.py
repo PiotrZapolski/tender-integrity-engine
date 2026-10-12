@@ -10,6 +10,7 @@ from tie.ezam.documents import (
     DOWNLOAD_URL,
     classify,
     download_document,
+    list_documents,
     sync_documents,
 )
 from tie.http import PoliteClient
@@ -49,3 +50,23 @@ def test_sync_and_download(db, fixtures, tmp_path):
                      (doc_id,)).fetchone()
     assert row["status"] == "downloaded" and row["raw_sha256"] == sha
     assert db.execute("select count(*) c from jobs where kind='opening_parse'").fetchone()["c"] == 1
+
+
+def test_classify_ignores_deadline_changes():
+    name = "OGŁOSZENIE O ZMIANIE - NOWE TERMINY SKŁADANIA I OTWARCIA OFERT.pdf"
+    assert classify("OGŁOSZENIE O ZMIANIE TERMINÓW", name) == "other"
+    assert classify("ODPOWIEDZI NA PYTANIA I NOWE TREMINY SKŁADANIA I OTWARCIA OFERT",
+                    "ODPOWIEDZI NA PYTANIA.pdf") == "other"
+    assert classify("Otwarcie ofert", "otwarcie.pdf") == "opening"
+
+
+@respx.mock
+def test_list_documents_skips_not_published(fixtures):
+    docs = json.loads((fixtures / "ezam" / "documents_31180df3.json").read_text("utf-8"))
+    route = respx.get(DOCS_URL).mock(return_value=httpx.Response(200, json=docs))
+    out = list_documents(PoliteClient("ua", {}, sleep=lambda s: None), OCDS)
+    assert route.calls.last.request.url.params["tenderId"] == OCDS
+    ids = {d["objectId"] for d in out}
+    assert len(out) == len(docs) - 2
+    assert f"{OCDS}_3" not in ids and f"{OCDS}_4" not in ids
+    assert all(d["tenderDocumentState"] == "Published" for d in out)
