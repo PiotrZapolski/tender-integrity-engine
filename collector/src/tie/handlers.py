@@ -199,6 +199,17 @@ def _whitelist(ctx: Context, payload: dict) -> None:
     log.info("whitelist: %d bidders enriched, %d still unchecked", total, left)
 
 
+def _engine_run(ctx: Context, payload: dict) -> None:
+    # Imported here: the engine pulls in numpy and igraph, which the collector jobs never need.
+    from tie.engine.run import run_engine
+
+    as_of = (date.fromisoformat(payload["as_of"]) if payload.get("as_of")
+             else datetime.now(UTC).date())
+    result = run_engine(ctx, as_of, full=bool(payload.get("full")))
+    log.info("engine_run %s: run %s %s %s", as_of, result["run_id"], result["status"],
+             result["counts"])
+
+
 def _msig_board(ctx: Context, payload: dict) -> None:
     secret = ctx.settings.person_hmac_secret if ctx.settings else None
     msig.run_job(ctx.conn, ctx.client, secret, payload)
@@ -213,6 +224,7 @@ HANDLERS: dict[str, Callable[[Context, dict], None]] = {
     "opening_parse": _opening_parse,
     "identity": _identity,
     "whitelist": _whitelist,
+    "engine_run": _engine_run,
     "msig_board": _msig_board,
 }
 

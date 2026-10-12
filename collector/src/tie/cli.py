@@ -1,4 +1,5 @@
-"""`tie` command line: migrate, backfill, daily, worker, stats, gold-extract, gold-export."""
+"""`tie` command line: migrate, backfill, daily, engine-run, worker, stats, gold-extract,
+gold-export, gold-kio."""
 
 from __future__ import annotations
 
@@ -89,6 +90,28 @@ def cmd_daily(args: argparse.Namespace) -> int:
         else:
             log.warning("daily: PERSON_HMAC_SECRET not set, msig_board jobs not queued")
     log.info("daily %s: %d new jobs", t, added)
+    return 0
+
+
+def cmd_engine_run(args: argparse.Namespace) -> int:
+    as_of = args.as_of or today()
+    if args.now:
+        # Imported here: the engine pulls in numpy and igraph, which other commands never need.
+        from tie.engine.run import run_engine
+
+        ctx = Context.from_settings(load_settings())
+        try:
+            result = run_engine(ctx, as_of, full=args.full)
+        finally:
+            ctx.close()
+        print(json.dumps(result, ensure_ascii=False, sort_keys=True, default=str))
+        return 0
+    stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S")
+    # The timestamp in the key lets a manual run follow the nightly one on the same day.
+    key = f"{as_of.isoformat()}{':full' if args.full else ''}@{stamp}"
+    with _connect() as conn:
+        added = enqueue(conn, "engine_run", key, {"as_of": as_of.isoformat(), "full": args.full})
+    log.info("engine-run %s: job %s %s", as_of, key, "queued" if added else "already queued")
     return 0
 
 
@@ -218,6 +241,13 @@ def build_parser() -> argparse.ArgumentParser:
     b.set_defaults(func=cmd_backfill)
 
     sub.add_parser("daily", help="queue the daily jobs").set_defaults(func=cmd_daily)
+
+    e = sub.add_parser("engine-run", help="queue an engine run (or run it now with --now)")
+    e.add_argument("--as-of", type=_date, help="run date, YYYY-MM-DD (default: today)")
+    e.add_argument("--full", action="store_true", help="mark the run as a full recompute")
+    e.add_argument("--now", action="store_true",
+                   help="run in this process instead of queueing an engine_run job")
+    e.set_defaults(func=cmd_engine_run)
 
     w = sub.add_parser("worker", help="run queued jobs")
     w.add_argument("--kinds", help="comma separated job kinds (default: all)")

@@ -23,7 +23,7 @@ Production runs on one box under `/var/www/tie/`, as a Docker Compose project na
 ## Daily operation
 
 - `cron` (supercronic, `collector/crontab`) runs `tie daily` at 23:00 UTC (01:00 in Poland
-  during summer time) and `tie stats` every 30 minutes.
+  during summer time), `tie engine-run` at 02:30 UTC and `tie stats` every 30 minutes.
 - Workers are split by job kind so one slow host never blocks the rest:
   - `worker-ezam`: `bzp_day`, `ezam_docs`, `ezam_download` (the only process talking to
     ezamowienia.gov.pl, so its 2 s gap holds). Keep one replica.
@@ -33,6 +33,82 @@ Production runs on one box under `/var/www/tie/`, as a Docker Compose project na
   - `worker`: ezamawiajacy, identity (Jev), whitelist, MSiG, engine. Keep one replica: each
     external host must be served by exactly one process so per-host rate limits hold.
 - `migrate` runs `tie migrate` once on every `up`, before `worker` and `cron` start.
+
+## Engine
+
+The analysis engine (markets, OECD tests, co-bidder clusters, signals, explanations) runs
+once a day. At 02:30 UTC `cron` runs `tie engine-run`, which only queues an `engine_run`
+job (payload `{"as_of": "<today>", "full": false}`); the single `worker` runs it, so the
+engine shares the worker's CPU and memory limits and the AI budget. While a long backfill
+is queued the job waits behind the older ready jobs.
+
+Each run gets a new row in `engine_runs` and goes through: OECD catalog seed, markets,
+pairs, clusters, lot, firm, pair and market tests, signals (Jev decision, or the fallback
+regression with status at most `review` when `JEV_API_KEY` is missing or the budget is
+spent), and explanations of published signals that have none for their current evidence
+(DeepSeek when `DEEPSEEK_API_KEY` is set, otherwise the template). A step that fails marks
+the run `failed` with the step and the error in `params`, and the job is retried with the
+usual backoff. A second run on the same day is safe: it gets a new `run_id`, signals keep
+their `signal_id`, and unchanged evidence is not sent to Jev again. "Unchanged" is judged on
+a coarse decision package (members, OECD items present, percentiles rounded to 0.05), so
+the daily slide of the 36-month window does not trigger new Jev calls and new explanations.
+
+Publication switch `ENGINE_MAX_STATUS` (in `infra/.env`, default `review`): the highest
+status the engine may give a signal (`hidden`, `review` or `published`). With the default
+nothing is published and `api.signals` stays empty; every candidate lands in `review`. Set
+`ENGINE_MAX_STATUS=published` only after the thresholds were calibrated on the gold set and
+a sample of `review` signals was checked by a person, then redeploy. Even then a signal is
+published only when Jev (never the fallback) gives a combined probability of at least 0.91
+from its three strongest OECD items, the strongest item at least 0.8 and at least two items
+at least 0.6. The value used is recorded in `engine_runs.params->>'max_status'`.
+
+Jev errors: an HTTP 4xx other than 429 (rejected key, wrong request shape, unknown model)
+turns Jev off for the rest of the run after the first call; the error and the start of the
+response body are logged once, the remaining clusters get the fallback, and the reason is
+stored in `engine_runs.params->>'jev_disabled_reason'` (also after a spent budget or 5
+consecutive other errors). If a Jev key is configured but a run made no Jev decision, the
+run counts carry `"warning": "decider configured, 0 jev calls"`:
+
+```sql
+select run_id, params->>'jev_disabled_reason' jev_off, params->'counts'->'signals' signals
+from engine_runs order by run_id desc limit 5;
+```
+
+Pruning: after each successful run `test_results`, `pairs` and `clusters` keep only the
+rows of the last 2 `done` runs, and `explanations` drops rows of an older evidence version
+once the signal has an explanation for its current one. The deleted row counts are in
+`params->'counts'->'prune'`. `signals.evidence` is self-contained, so the API does not need
+the pruned rows.
+
+Run it by hand, from `/var/www/tie/infra`:
+
+- queue a run for the worker (as cron does): `... run --rm worker tie engine-run`;
+- for another date or flagged as a full recompute: `tie engine-run --as-of 2026-10-01 --full`
+  (`--full` is only recorded in `params` for now; every run recomputes all markets);
+- run it in the foreground and print the counters as JSON:
+  `docker compose -f docker-compose.yml -f docker-compose.prod.yml run --rm worker tie engine-run --now`.
+
+Only one run works at a time (Postgres advisory lock); a second one fails with "another
+engine run is in progress" and its job is retried later. A run still `running` after 12
+hours (worker killed) is marked `failed` by the next run. Check the latest runs:
+
+```sql
+select run_id, as_of, status, started_at, finished_at - started_at took,
+       params->'counts' counts, params->>'failed_step' step, params->>'error' error
+from engine_runs order by run_id desc limit 10;
+```
+
+Signals by status: `select status, count(*) from signals group by 1;`.
+
+## Read-only role for the frontend
+
+The zmowy.pl frontend reads the engine's results through the views in schema `api` as the
+role `tie_reader`. Migration 006 creates `tie_reader` without login. Once per database,
+from `/var/www/tie/infra`, give it a password:
+`docker compose -f docker-compose.yml -f docker-compose.prod.yml exec db psql -U tie -d tie -c "alter role tie_reader with login password '<strong password>'"`.
+The frontend connects as `tie_reader` and reads only schema `api`; it cannot read the
+tables behind the views. Names of bidders that may be natural persons are masked in `api.*`
+(shown as `NIP <nip>`) until the whitelist check confirms a KRS entry.
 
 ## Monitoring
 

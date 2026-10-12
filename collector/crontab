@@ -1,3 +1,5 @@
 # Server time is UTC; 23:00 UTC = 01:00 in Poland during summer time.
 0 23 * * * tie daily
+# Queues an engine_run job; the worker runs it after the night's collector jobs.
+30 2 * * * tie engine-run
 */30 * * * * tie stats
