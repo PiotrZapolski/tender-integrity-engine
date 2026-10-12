@@ -38,6 +38,15 @@ def engine_min_lots(env: Mapping[str, str] | None = None) -> int:
     return value
 
 
+def priority_provinces(env: Mapping[str, str] | None = None) -> tuple[str, ...]:
+    """`PRIORITY_PROVINCES` (default empty): comma separated province codes, e.g. `PL14,PL12`.
+
+    `tie prioritize` moves queued document jobs of buyers from these provinces forward."""
+    e = os.environ if env is None else env
+    raw = e.get("PRIORITY_PROVINCES") or ""
+    return tuple(code.strip().upper() for code in raw.split(",") if code.strip())
+
+
 @dataclass(frozen=True)
 class Settings:
     database_url: str
@@ -55,6 +64,7 @@ class Settings:
     person_hmac_secret: str | None = None
     msig_daily_cap: int = 500
     msig_recheck_days: int = 180
+    priority_provinces: tuple[str, ...] = ()
 
 
 def load_settings(env: Mapping[str, str] | None = None) -> Settings:
@@ -73,4 +83,5 @@ def load_settings(env: Mapping[str, str] | None = None) -> Settings:
         person_hmac_secret=e.get("PERSON_HMAC_SECRET") or None,
         msig_daily_cap=int(e.get("MSIG_DAILY_CAP", "500")),
         msig_recheck_days=int(e.get("MSIG_RECHECK_DAYS", "180")),
+        priority_provinces=priority_provinces(e),
     )

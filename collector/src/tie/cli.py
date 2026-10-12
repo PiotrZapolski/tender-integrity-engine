@@ -21,7 +21,7 @@ from tie.gold.sources import UOKIK_DECISIONS, get_decision
 from tie.handlers import Context, run_once
 from tie.identity import msig
 from tie.identity.bidders import MAX_IDENTITY_FAILURES
-from tie.jobs import enqueue, requeue_stale
+from tie.jobs import enqueue, prioritize_provinces, requeue_stale
 
 log = logging.getLogger("tie.cli")
 
@@ -192,6 +192,20 @@ def cmd_stats(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_prioritize(args: argparse.Namespace) -> int:
+    if args.provinces is None:
+        provinces = list(load_settings().priority_provinces)
+    else:
+        provinces = [p.strip().upper() for p in args.provinces.split(",") if p.strip()]
+    if not provinces:
+        log.info("prioritize: no provinces configured, nothing to do")
+        return 0
+    with _connect() as conn:
+        moved = prioritize_provinces(conn, provinces)
+    log.info("prioritize: %d jobs moved forward for %s", moved, ",".join(provinces))
+    return 0
+
+
 def cmd_gold_kio(args: argparse.Namespace) -> int:
     from tie.gold import kio  # imported here: the command stays self-contained
 
@@ -274,6 +288,13 @@ def build_parser() -> argparse.ArgumentParser:
     w.set_defaults(func=cmd_worker)
 
     sub.add_parser("stats", help="print counts as JSON").set_defaults(func=cmd_stats)
+
+    pr = sub.add_parser("prioritize",
+                        help="move queued document jobs of priority provinces forward")
+    pr.add_argument("--provinces", metavar="CODES",
+                    help="comma separated province codes, e.g. PL14,PL12 "
+                         "(default: PRIORITY_PROVINCES)")
+    pr.set_defaults(func=cmd_prioritize)
 
     k = sub.add_parser("gold-kio", help="gold labels from KIO rulings on collusion")
     k.add_argument("--only", help="one curated ruling, e.g. 'KIO 2378/21'")

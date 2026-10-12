@@ -4,3 +4,5 @@
 # database, so new anomalies surface the same day; go back to daily (30 2 * * *) afterwards.
 17 * * * * tie engine-run
 */30 * * * * tie stats
+# Moves queued document jobs of the PRIORITY_PROVINCES buyers to the front of the queue.
+*/5 * * * * tie prioritize

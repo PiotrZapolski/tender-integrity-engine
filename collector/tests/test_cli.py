@@ -198,3 +198,7 @@ def test_worker_stops_after_max_jobs(db, dburl, monkeypatch, tmp_path):
     assert sorted(p["n"] for p in seen) == [1, 2]
     statuses = {r["status"] for r in db.execute("select status from jobs").fetchall()}
     assert statuses == {"done"}
+
+
+def test_prioritize_command_runs(db, dburl):
+    assert cli.main(["prioritize", "--provinces", "PL14"]) == 0

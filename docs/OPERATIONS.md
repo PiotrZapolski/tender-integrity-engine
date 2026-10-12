@@ -277,4 +277,8 @@ The job reads the URL from `procedures.platform_url` when the payload has none.
   Changing it changes every key: after a change run
   `truncate board_links, msig_announcements; update bidders set msig_checked_at = null;`
   and let the daily jobs rebuild the links.
+- `PRIORITY_PROVINCES` (comma separated province codes such as `PL14,PL12`, default empty; set
+  for the `cron` service in `infra/docker-compose.prod.yml`): every 5 minutes `tie prioritize`
+  moves queued `ezam_*` and `ezamawiajacy_*` document jobs of buyers from these provinces to the
+  front of the queue. Jobs already moved are skipped; `tie prioritize --provinces PL14` runs it by hand.
 - Never edit tracked files on the server; change the repo and redeploy.
