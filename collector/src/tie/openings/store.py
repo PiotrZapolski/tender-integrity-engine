@@ -81,7 +81,8 @@ def _load_document(conn: psycopg.Connection, document_id: int) -> dict:
 
 def _load_lots(conn: psycopg.Connection, procedure_id: str) -> list[_Lot]:
     rows = conn.execute(
-        "select l.id, l.lot_no, l.n_offers, l.price_min, l.price_max, l.price_winner,"
+        "select l.id, l.lot_no, l.n_offers, l.n_rejected, l.price_min, l.price_max,"
+        " l.price_winner,"
         " l.winner_bidder_id, b.nip as winner_nip, b.name_norm as winner_name_norm"
         " from lots l left join bidders b on b.id = l.winner_bidder_id"
         " where l.procedure_id = %s order by l.lot_no",
@@ -98,6 +99,7 @@ def _load_lots(conn: psycopg.Connection, procedure_id: str) -> list[_Lot]:
                 price_winner=r["price_winner"],
                 winner_nip=r["winner_nip"],
                 winner_name_norm=r["winner_name_norm"],
+                n_rejected=r["n_rejected"],
             ),
             winner_bidder_id=r["winner_bidder_id"],
         )
@@ -159,7 +161,11 @@ def _bidder_by_nip(conn: psycopg.Connection, name: str, nip: str) -> int | None:
 
 
 def _write_bids(conn: psycopg.Connection, document_id: int, lot: _Lot, rows: list[OfferRow],
-                scale: Decimal, method: str) -> list[int]:
+                result: CheckResult, method: str) -> list[int]:
+    """Write every offer of the lot, including the ones outside the BZP range (likely
+    rejected, flagged in `outside_bzp_range`): cover bids are often rejected."""
+    scale = result.scale
+    outside = result.outside_range or [False] * len(rows)
     winner = _winner_index(rows, lot.facts, scale)
     ranks = _ranks(rows)
     ids: list[int] = []
@@ -175,8 +181,8 @@ def _write_bids(conn: psycopg.Connection, document_id: int, lot: _Lot, rows: lis
         out = conn.execute(
             "insert into bids(lot_id, document_id, offer_no, bidder_id, bidder_name_raw,"
             " bidder_nip_raw, price, price_scale, is_winner, rank, parse_method,"
-            " match_confidence)"
-            " values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)"
+            " match_confidence, outside_bzp_range)"
+            " values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)"
             " on conflict (lot_id, offer_no, bidder_name_raw) do update set"
             "  document_id = excluded.document_id,"
             "  bidder_id = coalesce(excluded.bidder_id, bids.bidder_id),"
@@ -187,10 +193,11 @@ def _write_bids(conn: psycopg.Connection, document_id: int, lot: _Lot, rows: lis
             "  price_scale = excluded.price_scale,"
             "  is_winner = excluded.is_winner,"
             "  rank = excluded.rank,"
-            "  parse_method = excluded.parse_method"
+            "  parse_method = excluded.parse_method,"
+            "  outside_bzp_range = excluded.outside_bzp_range"
             " returning id",
             (lot.id, document_id, row.offer_no, bidder_id, row.bidder_name, row.nip,
-             row.price, scale, i == winner, ranks[i], method, confidence),
+             row.price, scale, i == winner, ranks[i], method, confidence, outside[i]),
         ).fetchone()
         ids.append(out["id"])
     return ids
@@ -206,7 +213,7 @@ def _store(conn: psycopg.Connection, document_id: int,
     ids: list[int] = []
     lot_ids: list[int] = []
     for lot, rows, result in checked:
-        ids.extend(_write_bids(conn, document_id, lot, rows, result.scale, method))
+        ids.extend(_write_bids(conn, document_id, lot, rows, result, method))
         lot_ids.append(lot.id)
     conn.execute(
         "delete from bids where (lot_id = any(%s::bigint[]) or document_id = %s)"
