@@ -8,7 +8,7 @@ from datetime import date, datetime
 from decimal import Decimal
 from urllib.parse import urlparse
 
-from selectolax.parser import HTMLParser
+from selectolax.lexbor import LexborHTMLParser
 
 from tie.money import clean_nip, parse_amount
 
@@ -59,7 +59,7 @@ class ResultNotice:
     lots: list[LotResult]
 
 
-_HEADINGS = {"h1", "h2", "h3", "h4"}
+_HEADINGS = "h1, h2, h3, h4"
 _FIELD = re.compile(r"^(\d+(?:\.\d+)*\.?\))\s*(.*?):\s*(.*)$")
 _LOT_HEADER = re.compile(r"^SEKCJA V ZAKOŃCZENIE POSTĘPOWANIA \(dla części (\d+)\)")
 _LOT_LINE = re.compile(r"^Część (\d+)$")
@@ -82,16 +82,14 @@ _ORDER_TYPES = {"Works": "Works", "Supplies": "Supplies", "Delivery": "Supplies"
 
 
 def _lines(html: str) -> list[str]:
-    tree = HTMLParser(html or "")
-    root = tree.root
-    if root is None:
+    if not html:
         return []
     out: list[str] = []
-    for node in root.traverse():
-        if node.tag in _HEADINGS:
-            text = re.sub(r"\s+", " ", node.text(separator=" ")).strip()
-            if text:
-                out.append(text)
+    # Lexbor css() zwraca węzły w kolejności dokumentu.
+    for node in LexborHTMLParser(html).css(_HEADINGS):
+        text = re.sub(r"\s+", " ", node.text(separator=" ")).strip()
+        if text:
+            out.append(text)
     return out
 
 
