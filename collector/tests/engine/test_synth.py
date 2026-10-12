@@ -1,4 +1,5 @@
 from decimal import Decimal
+from itertools import pairwise
 
 import pytest
 
@@ -89,7 +90,7 @@ def test_rotation_market_shape(db):
     for lot in cartel_lots:
         assert cartel <= {b["bidder_id"] for b in _bids(db, lot["id"])}
     order = [lot["winner_bidder_id"] for lot in cartel_lots]
-    assert all(a != b for a, b in zip(order, order[1:], strict=False))
+    assert all(a != b for a, b in pairwise(order))
     for member in cartel:
         assert order.count(member) >= 10
 
