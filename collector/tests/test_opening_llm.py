@@ -107,7 +107,7 @@ def test_system_prompt_exact():
     for phrase in ("Część nr 2", "Dla Części 3", "Zadanie nr 4", "Część II", "lot_no",
                    "sprostowani", "łącznie"):
         assert phrase in SYSTEM_PROMPT, phrase
-    assert " - " not in SYSTEM_PROMPT and "-" not in SYSTEM_PROMPT
+    assert chr(0x2014) not in SYSTEM_PROMPT and chr(0x2013) not in SYSTEM_PROMPT
 
 
 def test_slice_keeps_lot_header_above_first_marker():
