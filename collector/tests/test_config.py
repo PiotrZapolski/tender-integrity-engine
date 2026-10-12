@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-from tie.config import engine_max_status, load_settings
+from tie.config import engine_max_status, engine_min_lots, load_settings
 
 
 def test_defaults():
@@ -41,3 +41,15 @@ def test_engine_max_status_defaults_to_review_and_validates():
                          ).engine_max_status == "hidden"
     with pytest.raises(ValueError):
         engine_max_status({"ENGINE_MAX_STATUS": "public"})
+
+
+def test_engine_min_lots_defaults_to_8_and_validates():
+    assert load_settings({"DATABASE_URL": "x"}).engine_min_lots == 8
+    assert engine_min_lots({}) == 8
+    assert engine_min_lots({"ENGINE_MIN_LOTS": ""}) == 8
+    assert engine_min_lots({"ENGINE_MIN_LOTS": " 12 "}) == 12
+    assert load_settings({"DATABASE_URL": "x", "ENGINE_MIN_LOTS": "3"}).engine_min_lots == 3
+    with pytest.raises(ValueError):
+        engine_min_lots({"ENGINE_MIN_LOTS": "many"})
+    with pytest.raises(ValueError):
+        engine_min_lots({"ENGINE_MIN_LOTS": "-1"})
