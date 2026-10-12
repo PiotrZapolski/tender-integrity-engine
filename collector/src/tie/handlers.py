@@ -82,7 +82,7 @@ class Context:
         for resource in self._owned:
             try:
                 resource.close()
-            except Exception:  # noqa: BLE001 - closing on shutdown, nothing to recover
+            except Exception:  # closing on shutdown, nothing to recover
                 log.warning("close failed for %r", resource, exc_info=True)
 
 
