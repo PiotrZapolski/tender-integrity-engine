@@ -53,7 +53,9 @@ def test_bzp_incomplete():
 
 
 def test_winner_name_mismatch():
-    facts = LotFacts(8, D("239497.36"), D("301571.04"), D("239497.36"), None, "inna firma spzoo")
+    # The BZP winner price is close to an offer (0.5% rule) but equals none exactly, so the
+    # unique-price rule does not apply either.
+    facts = LotFacts(8, D("239497.36"), D("301571.04"), D("239600.00"), None, "inna firma spzoo")
     r = cross_check(rows(SPY), facts)
     assert not r.ok and r.reasons == ["winner"]
 
@@ -191,9 +193,9 @@ def bambino_rows():
 
 
 def bambino_facts(**kw):
-    base = dict(n_offers=5, price_min=None, price_max=D("1069345.76"),
-                price_winner=D("259777.11"), winner_nip="7251933448", winner_name_norm=None,
-                n_rejected=0)
+    base = {"n_offers": 5, "price_min": None, "price_max": D("1069345.76"),
+            "price_winner": D("259777.11"), "winner_nip": "7251933448",
+            "winner_name_norm": None, "n_rejected": 0}
     base.update(kw)
     return LotFacts(**base)
 
