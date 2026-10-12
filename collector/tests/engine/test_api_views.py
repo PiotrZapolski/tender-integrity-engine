@@ -209,7 +209,13 @@ def test_signals_has_one_published_row_with_contract_fields(db, world):
     assert len(s["facts"]) == 3
     assert all(set(f) == {"value", "label"} and isinstance(f["value"], str)
                for f in s["facts"])
-    assert s["facts"][0] == {"value": str(n), "label": "przetargów razem"}
+    # Odmiana: 32 przetargi (końcówka 2-4 poza 12-14), 25 przetargów.
+    assert n == 32
+    assert s["facts"][0] == {"value": "32", "label": "przetargi razem"}
+    assert db.execute(
+        "select tie_plural(25, 'przetarg', 'przetargi', 'przetargów') a,"
+        " tie_plural(12, 'przetarg', 'przetargi', 'przetargów') b"
+    ).fetchone() == {"a": "przetargów", "b": "przetargów"}
     assert s["facts"][1] == {"value": "3", "label": "firmy w grupie"}
 
     assert len(s["strip"]) == min(24, n)
@@ -380,7 +386,7 @@ def test_reader_role_reads_only_api(db, world):
         for view in CONTRACT:
             db.execute(f"select * from api.{view}").fetchall()
         with pytest.raises(psycopg.errors.InsufficientPrivilege):
-            db.execute("select * from bidders").fetchall()
+            db.execute("select * from public.bidders").fetchall()
     finally:
         db.rollback()
         db.execute("reset role")
