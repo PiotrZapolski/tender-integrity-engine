@@ -90,14 +90,13 @@ def _post(client: PoliteClient, budget: Budget, *, provider: str, model: str, ta
         raise RuntimeError(f"{provider} request failed: HTTP {r.status_code}: {r.text[:500]}")
     try:
         data = r.json()
-    except ValueError as e:
+    except ValueError:
+        data = None
+    is_object = isinstance(data, dict)
+    if not is_object:
         budget.record(provider=provider, model=model, task=task, input_tokens=0,
                       output_tokens=0, latency_ms=latency_ms, ok=False)
-        raise RuntimeError(f"{provider} returned non-JSON body") from e
-    if not isinstance(data, dict):
-        budget.record(provider=provider, model=model, task=task, input_tokens=0,
-                      output_tokens=0, latency_ms=latency_ms, ok=False)
-        raise RuntimeError(f"{provider} returned unexpected JSON body")
+        raise RuntimeError(f"{provider} returned a body that is not a JSON object")
     return data, latency_ms
 
 
