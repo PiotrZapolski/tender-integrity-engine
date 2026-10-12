@@ -7,7 +7,7 @@ from docx import Document
 from tie.bzp.parser import parse_result_notice
 from tie.bzp.store import upsert_bidder, upsert_notice
 from tie.openings.llm import SYSTEM_PROMPT, LlmOpening, extract_with_llm, slice_offers_text
-from tie.openings.store import process_opening_document
+from tie.openings.store import process_opening_document, raw_dir
 from tie.rawstore import RawStore
 
 SPY_OCDS = "ocds-148610-05afc816-7c33-4416-8a4f-8a804d3d4b32"
@@ -171,6 +171,22 @@ def test_spytkowo_llm_path(db, fixtures, tmp_path):
     # reprocessing is idempotent
     assert process_opening_document(db, rs, fake, doc_id) == "parsed"
     assert db.execute("select count(*) c from bids").fetchone()["c"] == 8
+
+
+def test_raw_file_read_from_folder_of_document_source(db, fixtures, tmp_path):
+    rec = json.loads((fixtures / "bzp" / "result_spytkowo.json").read_text("utf-8"))
+    upsert_notice(db, parse_result_notice(rec), "sha")
+    rs = RawStore(tmp_path)
+    data = (fixtures / "openings" / "spytkowo_unit_prices.pdf").read_bytes()
+    sha = rs.put(data, source="ezamawiajacy")
+    doc_id = db.execute(
+        "insert into documents(procedure_id, source, source_doc_id, file_name, doc_type,"
+        " raw_sha256, status) values (%s,'ezamawiajacy','x.ezamawiajacy.pl:1',"
+        " 'spytkowo.pdf','opening',%s,'downloaded') returning id", (SPY_OCDS, sha)).fetchone()["id"]
+    db.commit()
+    fake = FakeProvider({"budget": None, "offers": spy_offers()})
+    assert process_opening_document(db, rs, fake, doc_id) == "parsed"
+    assert raw_dir("ezamowienia") == "ezam" and raw_dir("ezamawiajacy") == "ezamawiajacy"
 
 
 def test_mismatch_when_llm_wrong(db, fixtures, tmp_path):

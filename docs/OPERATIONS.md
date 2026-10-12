@@ -128,6 +128,30 @@ API change), give the excluded bids another chance:
 update bids set identity_failures = 0 where bidder_id is null;
 ```
 
+## Opening documents from ezamawiajacy.pl
+
+Procedures on the Marketplanet platform (`procedures.platform = 'ezamawiajacy'`) get an
+`ezamawiajacy_docs` job when BZP field 1.6 links to the procedure page
+(`/pn/<buyer>/demand/<id>/notice/public/details`) and a lot has at least 2 offers. A link to
+the buyer's home page only cannot be followed and is skipped. All `*.ezamawiajacy.pl` hosts
+share one gap of 5 s between requests; robots.txt of each host is read first and obeyed
+(a disallowed download leaves the document with `status = 'blocked'`). Files go to the raw
+store folder `ezamawiajacy`.
+
+Procedures stored before this collector existed need the jobs queued once:
+
+```sql
+insert into jobs(kind, key, payload)
+select 'ezamawiajacy_docs', p.ocds_id, jsonb_build_object('ocds_id', p.ocds_id)
+from procedures p
+where p.platform = 'ezamawiajacy'
+  and p.platform_url ~ '/pn/[^/]+/demand/(\d+/notice/public|notice/public/\d+)/details/?$'
+  and exists (select 1 from lots l where l.procedure_id = p.ocds_id and l.n_offers >= 2)
+on conflict (kind, key) do nothing;
+```
+
+The job reads the URL from `procedures.platform_url` when the payload has none.
+
 ## Backup
 
 - Postgres is backed up automatically by the host's `/opt/backup` (auto-discovered).
@@ -139,4 +163,10 @@ update bids set identity_failures = 0 where bidder_id is null;
 - API keys (`JEV_API_KEY`, `DEEPSEEK_API_KEY`) live only in `/var/www/tie/infra/.env` on the
   server. Never commit them and never log them.
 - Rotate the Jev key after the hackathon.
+- `PERSON_HMAC_SECRET` keys the MSiG person hashes (`board_links.person_key`, see
+  `docs/msig.md`). Generate it once (`openssl rand -hex 32`), keep it only in `.env` and in
+  the owner's password manager. While it is unset, `tie daily` queues no `msig_board` jobs.
+  Changing it changes every key: after a change run
+  `truncate board_links, msig_announcements; update bidders set msig_checked_at = null;`
+  and let the daily jobs rebuild the links.
 - Never edit tracked files on the server; change the repo and redeploy.

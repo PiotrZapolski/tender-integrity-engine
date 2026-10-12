@@ -32,6 +32,7 @@ import psycopg
 from pydantic import ValidationError
 
 from tie.bzp.store import upsert_bidder
+from tie.ezam import documents as ezam_documents
 from tie.money import clean_nip
 from tie.openings.crosscheck import CheckResult, LotFacts, cross_check
 from tie.openings.extract import extract_text
@@ -41,11 +42,18 @@ from tie.rawstore import RawStore
 
 log = logging.getLogger(__name__)
 
-RAW_SOURCE = "ezam"
+# Raw store folder of each `documents.source`. e-Zamowienia files live in "ezam"; any other
+# source uses its own name as the folder (e.g. "ezamawiajacy").
+RAW_DIRS = {ezam_documents.SOURCE: ezam_documents.RAW_SOURCE}
 PARSED = "parsed"
 MISMATCH = "mismatch"
 NEEDS_REVIEW = "needs_review"
 MAX_ERROR_LEN = 500
+
+
+def raw_dir(source: str) -> str:
+    """Raw store folder holding the files of documents with this `documents.source`."""
+    return RAW_DIRS.get(source, source)
 
 
 @dataclass(frozen=True)
@@ -67,7 +75,7 @@ class _Lot:
 
 def _load_document(conn: psycopg.Connection, document_id: int) -> dict:
     row = conn.execute(
-        "select d.id, d.procedure_id, d.file_name, d.raw_sha256, b.nip as buyer_nip"
+        "select d.id, d.procedure_id, d.source, d.file_name, d.raw_sha256, b.nip as buyer_nip"
         " from documents d"
         " join procedures p on p.ocds_id = d.procedure_id"
         " left join buyers b on b.id = p.buyer_id"
@@ -289,7 +297,7 @@ def _process(conn: psycopg.Connection, rawstore: RawStore, provider: TextProvide
     if not doc["raw_sha256"]:
         return _finish(conn, document_id, NEEDS_REVIEW, "raw_missing")
     try:
-        data = rawstore.get(doc["raw_sha256"], source=RAW_SOURCE)
+        data = rawstore.get(doc["raw_sha256"], source=raw_dir(doc["source"]))
     except FileNotFoundError:
         return _finish(conn, document_id, NEEDS_REVIEW, "raw_missing")
     try:

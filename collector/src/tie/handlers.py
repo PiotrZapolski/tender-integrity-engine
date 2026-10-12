@@ -26,10 +26,12 @@ from tie.config import Settings
 from tie.db import connect
 from tie.ezam.documents import download_document, sync_documents
 from tie.http import PoliteClient
+from tie.identity import msig
 from tie.identity.bidders import UNMATCHED_SQL, resolve_unmatched_bids
 from tie.identity.whitelist import enrich_bidders
 from tie.jobs import MAX_ERROR_LEN, claim, complete, enqueue, fail
 from tie.openings.store import process_opening_document
+from tie.platforms import ezamawiajacy
 from tie.rawstore import RawStore
 
 log = logging.getLogger(__name__)
@@ -41,6 +43,10 @@ RATES: dict[str, float] = {
     "wl-api.mf.gov.pl": 2.0,
     "api.typesafe.ai": 0.1,
     "api.deepseek.com": 0.2,
+    # One gap for all *.ezamawiajacy.pl subdomains (one Marketplanet platform behind them).
+    ezamawiajacy.DOMAIN: ezamawiajacy.MIN_GAP_S,
+    # MSiG publishes no limit; research paced it at 0.6 s or slower, we stay at 1 s.
+    "wyszukiwarka-msig.ms.gov.pl": 1.0,
 }
 # Extra statuses retried per host: the e-Zamowienia WAF intermittently answers 403 under
 # load, and the same request succeeds minutes later.
@@ -124,6 +130,16 @@ def _ezam_download(ctx: Context, payload: dict) -> None:
     download_document(ctx.conn, ctx.client, ctx.rawstore, payload["ocds_id"], payload["doc_id"])
 
 
+def _ezamawiajacy_docs(ctx: Context, payload: dict) -> None:
+    n = ezamawiajacy.sync_documents(ctx.conn, ctx.client, payload["ocds_id"], payload.get("url"))
+    log.info("ezamawiajacy_docs %s: %d opening documents", payload["ocds_id"], n)
+
+
+def _ezamawiajacy_download(ctx: Context, payload: dict) -> None:
+    ezamawiajacy.download_document(ctx.conn, ctx.client, ctx.rawstore, payload["ocds_id"],
+                                   payload["doc_id"], payload["page_url"], payload["row_id"])
+
+
 def _opening_parse(ctx: Context, payload: dict) -> None:
     if ctx.text_provider is None:
         raise RuntimeError("DEEPSEEK_API_KEY not set")
@@ -183,13 +199,21 @@ def _whitelist(ctx: Context, payload: dict) -> None:
     log.info("whitelist: %d bidders enriched, %d still unchecked", total, left)
 
 
+def _msig_board(ctx: Context, payload: dict) -> None:
+    secret = ctx.settings.person_hmac_secret if ctx.settings else None
+    msig.run_job(ctx.conn, ctx.client, secret, payload)
+
+
 HANDLERS: dict[str, Callable[[Context, dict], None]] = {
     "bzp_day": _bzp_day,
     "ezam_docs": _ezam_docs,
     "ezam_download": _ezam_download,
+    ezamawiajacy.DOCS_JOB: _ezamawiajacy_docs,
+    ezamawiajacy.DOWNLOAD_JOB: _ezamawiajacy_download,
     "opening_parse": _opening_parse,
     "identity": _identity,
     "whitelist": _whitelist,
+    "msig_board": _msig_board,
 }
 
 
