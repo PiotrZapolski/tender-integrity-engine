@@ -43,7 +43,9 @@ _ROWS: list[tuple[str, str, str, str]] = [
      "C", "absencja na tle historii startów; podwykonawstwo tylko flaga z BZP"),
     ("3.1.4", "Wycofywanie ofert", "N", "wycofania przed terminem nie są publikowane"),
     ("3.1.5", "Zawsze startują, nigdy nie wygrywają", "A", "z list oferentów"),
-    ("3.1.6", "Wygrywanie na zmianę", "A", "wskaźnik rotacji w parach i klastrach"),
+    ("3.1.6", "Wygrywanie na zmianę", "A",
+     ("wskaźnik rotacji w parach i klastrach; z samego BZP: rotacja zwycięzców kolejnych"
+      " zamówień zamawiającego w małej grupie firm (test bzp.winner_rotation)")),
     ("3.1.7", "Wspólna oferta firm, które wcześniej startowały osobno", "A",
      "konsorcja z BZP plus historia startów"),
     ("3.1.8", "Stała grupa składa oferty niekompletne lub niezgodne", "C",
@@ -72,7 +74,9 @@ _ROWS: list[tuple[str, str, str, str]] = [
      ("Kolejność składania ofert sprawdzamy, jeśli raport z otwarcia podaje czas złożenia"
       " każdej oferty.")),
     ("3.2.11", "Ten sam adres lub siedziba, wspólne zobowiązania", "A",
-     "adresy, wspólne osoby i wspólnicy w KRS; broker niedostępny"),
+     ("adresy, wspólne osoby i wspólnicy w KRS; broker niedostępny; z samego BZP: firmy"
+      " wygrywające w tym samym rynku ze wspólnym rachunkiem lub adresem"
+      " (test bzp.shared_winners)")),
     # 3.3 Ceny
     ("3.3.1", "Nagłe lub identyczne podwyżki", "C",
      "indeks cen względem szacunku w rynku, skoki wspólne dla grupy"),
@@ -87,11 +91,13 @@ _ROWS: list[tuple[str, str, str, str]] = [
     ("3.3.6", "Regularne różnice cen, wzór matematyczny", "A",
      "stałość stosunków cen par oferentów, współczynnik zmienności stosunków"),
     ("3.3.7", "Duża luka zwycięzca vs reszta, przegrani zbliżeni", "A",
-     "odległość względna, rozrzut cen przegranych"),
+     ("odległość względna, rozrzut cen przegranych; z samego BZP: rozrzut cena najwyższa /"
+      " najniższa w częściach wygranych przez firmę lub grupę (test bzp.spread)")),
     ("3.3.8", "Oferta firmy dużo wyższa niż w podobnym zamówieniu", "A",
      "podobieństwo zamówień: embeddingi plus Jev `noul`"),
     ("3.3.9", "Zwycięska oferta znacznie ponad szacunek", "A",
-     "cena zwycięska / wartość szacunkowa"),
+     ("cena zwycięska / wartość szacunkowa; z samego BZP także mediana per zwycięzca"
+      " w rynku (test bzp.over_estimate)")),
     ("3.3.10", "Spadek cen po wejściu nowego oferenta", "A",
      "porównanie przed/po wejściu, względem szacunku"),
     ("3.3.11", "Firma lokalna drożej u siebie niż daleko", "A",

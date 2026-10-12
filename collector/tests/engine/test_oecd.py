@@ -39,7 +39,8 @@ def test_catalog_known_rows():
     by_item = {c.item: c for c in CATALOG}
     assert by_item["3.1.6"].title == "Wygrywanie na zmianę"
     assert by_item["3.1.6"].status == "A"
-    assert by_item["3.1.6"].how == "wskaźnik rotacji w parach i klastrach"
+    assert by_item["3.1.6"].how.startswith("wskaźnik rotacji w parach i klastrach")
+    assert "bzp.winner_rotation" in by_item["3.1.6"].how
     assert by_item["3.3.6"].how.startswith("stałość stosunków cen par oferentów")
     assert by_item["3.5.10"].status == "C"
     for n in range(1, 10):

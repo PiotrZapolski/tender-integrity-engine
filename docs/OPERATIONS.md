@@ -32,6 +32,10 @@ Production runs on one box under `/var/www/tie/`, as a Docker Compose project na
     calls in flight (3).
   - `worker`: ezamawiajacy, identity (Jev), whitelist, MSiG, engine. Keep one replica: each
     external host must be served by exactly one process so per-host rate limits hold.
+- The VAT whitelist is capped by the Ministry of Finance (about 90 requests of 30 NIPs a
+  day), so its queue order decides who gets bank account hashes and an address first: firms
+  with the most won lots (`lots.winner_bidder_id`), then firms seen in parsed bids, then
+  the rest. The BZP-only shared-data screen (`bzp.shared_winners`) depends on it.
 - `migrate` runs `tie migrate` once on every `up`, before `worker` and `cron` start.
 
 ## Engine
@@ -43,7 +47,7 @@ engine shares the worker's CPU and memory limits and the AI budget. While a long
 is queued the job waits behind the older ready jobs.
 
 Each run gets a new row in `engine_runs` and goes through: OECD catalog seed, markets,
-pairs, clusters, lot, firm, pair and market tests, signals (Jev decision, or the fallback
+pairs, clusters, lot, firm, pair and market tests, BZP-only screens, signals (Jev decision, or the fallback
 regression with status at most `review` when `JEV_API_KEY` is missing or the budget is
 spent), and explanations of published signals that have none for their current evidence
 (DeepSeek when `DEEPSEEK_API_KEY` is set, otherwise the template). A step that fails marks
@@ -77,7 +81,7 @@ Minimum evidence gate (applied after the thresholds, it only lowers a status):
   `ENGINE_MAX_STATUS=published`.
 
 The outcome is stored per signal in `signals.evidence->'decision'->>'gate'`: `ok`,
-`min_lots`, `min_buyers` or `weak_only`; run counts carry `"gates": {"min_lots": n, ...}`
+`min_lots`, `min_buyers`, `weak_only` or `single_buyer_rotation` (BZP-only, below); run counts carry `"gates": {"min_lots": n, ...}`
 for the non-`ok` outcomes. `signals.evidence` also has the market at the top level
 (`market_id`, `market_label` such as `CPV 45210 · wielkopolskie`, and `n_buyers`):
 
@@ -86,6 +90,38 @@ select status, evidence->'decision'->>'gate' gate, evidence->>'market_label' mar
        (evidence->>'n_lots')::int n_lots, (evidence->>'n_buyers')::int n_buyers,
        probability, oecd
 from signals order by probability desc limit 20;
+```
+
+BZP-only screens (step `bzp_only`, after the market tests, `tie.engine.bzp_only`): they use
+only BZP result notices (winner, number of offers and rejections, lowest, highest and
+winning price, estimate) plus `bidder_accounts` and `bidders.address`, so they cover every
+market as soon as BZP is loaded, without opening documents. Test ids start with `bzp.` and
+each maps to one OECD item:
+
+- `bzp.winner_rotation` (3.1.6): per buyer and market, a group of 2-5 firms that wins at
+  least 60% of the buyer's awarded lots (at least 6 lots), with no dominating member, and
+  hands the wins over between consecutive awards more often than chance (percentile against
+  500 permutations of the winners within each buyer).
+- `bzp.spread` (3.3.7): `price_max / price_min` for lots with 3+ offers and no rejection;
+  narrow or near-constant spreads of a firm's or a group's won lots against its market.
+- `bzp.over_estimate` (3.3.9): median `price_winner / estimated_value` per winner and market.
+- `bzp.shared_winners` (3.2.11): two firms that both win in the same market and share a
+  bank account hash or an address (an account or address of more than 5 firms is ignored).
+
+Rotation groups and connected shared-data groups become winner-based clusters
+(`clusters.cluster_id` starting with `w:`; `clusters.buyers` holds the rotation buyers when
+the lots are limited to them). They get the usual evidence (`"basis": "bzp_winners"`, the
+`bzp.*` result under its OECD item with a `test` field), Jev decision and gates, with three
+differences: `bzp.winner_rotation` counts as a strong item only with a percentile of at least
+0.99 (`bzp.shared_winners` is strong, spread and over-estimate stay weak); a rotation at a
+single buyer passes the two-buyer rule when the cluster has at least 10 lots (gate
+`single_buyer_rotation`); and a `w:` signal is never above `review`, whatever
+`ENGINE_MAX_STATUS` says. The run counts carry `"bzp_only"` with the seconds of each sub-step:
+
+```sql
+select params->'counts'->'bzp_only' from engine_runs order by run_id desc limit 1;
+select signal_id, status, evidence->'decision'->>'gate' gate, (evidence->>'n_lots')::int n,
+       oecd from signals where signal_id like 'w:%' order by probability desc limit 20;
 ```
 
 Jev errors: an HTTP 4xx other than 429 (rejected key, wrong request shape, unknown model)

@@ -45,6 +45,12 @@ wynik całego rynku (`rynek`) jest wybierany tylko wtedy, gdy nie ma wyniku klas
 `n_buyers` to liczba różnych zamawiających w częściach klastra (bramka minimalnych dowodów
 w `tie.engine.decide`). `market_id` i `market_label` na najwyższym poziomie są dla
 recenzentów (`signals.evidence->>'market_id'`); nie wchodzą do `evidence_hash`.
+
+Klaster zwycięzców (`cluster_id` z prefiksem `w:`, `tie.engine.bzp_only`): części to części
+rynku wygrane przez członka według BZP (przy `clusters.buyers` tylko u tych zamawiających),
+pakiet ma `"basis": "bzp_winners"`, a oprócz testów OECD wchodzą do niego testy BZP-only
+(`bzp.*`), każdy pod swoim punktem OECD (`bzp_only.OECD_ITEM`) z polem `test`, o ile ten
+punkt nie ma wyniku z ofert. Pakiety zwykłych klastrów współoferentów się nie zmieniają.
 """
 
 from __future__ import annotations
@@ -59,6 +65,7 @@ from typing import Any
 
 import psycopg
 
+from tie.engine.bzp_only import BZP_TESTS, OECD_ITEM, TEST_SPREAD, is_winner_cluster
 from tie.engine.explain import PROVINCES
 from tie.engine.oecd import CATALOG
 from tie.engine.tests_firm import firm_key
@@ -71,7 +78,9 @@ HIGH_PCT = 0.9
 # Punkty OECD sprawdzane automatycznie (A) lub częściowo (C): tylko one trafiają do dowodów.
 CHECKED = {c.item: c.status for c in CATALOG if c.status in ("A", "C")}
 # Testy, w których niższa wartość oznacza silniejszy sygnał (gdy brak percentyla).
-LOWER_IS_STRONGER = {"3.3.6", "3.3.10"}
+LOWER_IS_STRONGER = {"3.3.6", "3.3.10", TEST_SPREAD}
+# `basis` pakietu klastra zwycięzców (`w:`, testy BZP-only).
+BASIS_WINNERS = "bzp_winners"
 OTHER_WINNER = "inny"
 # Testy zero-jedynkowe: wiersz z wartością 0 to brak sygnału, nie trafia do pakietu.
 ZERO_IS_ABSENT = {"3.2.11", "3.3.5"}
@@ -207,11 +216,31 @@ def _cluster_lots(conn: psycopg.Connection, market_id: str, members: list[int]) 
     ).fetchall()
 
 
+def _winner_lots(conn: psycopg.Connection, market_id: str, members: list[int],
+                 buyers: list[int] | None) -> list[dict]:
+    """Części klastra zwycięzców (`w:`): części rynku wygrane przez członka (z BZP),
+    tylko u zamawiających `buyers`, gdy podano, od najstarszej."""
+    return conn.execute(
+        "select l.id as lot_id, l.procedure_id, p.buyer_id, l.price_winner, l.estimated_value,"
+        "  l.contract_value, l.winner_bidder_id, l.n_offers,"
+        "  array[l.winner_bidder_id] as member_ids,"
+        "  coalesce(l.contract_date, p.published_at::date) as day"
+        " from lot_market lm"
+        " join lots l on l.id = lm.lot_id"
+        " join procedures p on p.ocds_id = l.procedure_id"
+        " where lm.market_id = %(market)s and l.winner_bidder_id = any(%(members)s::bigint[])"
+        "  and (%(buyers)s::bigint[] is null or p.buyer_id = any(%(buyers)s::bigint[]))"
+        " order by day, l.id",
+        {"market": market_id, "members": members, "buyers": buyers},
+    ).fetchall()
+
+
 def _test_rows(conn: psycopg.Connection, run_id: int, cluster_id: str, market_id: str,
-               members: list[int], lot_ids: list[int]) -> list[dict]:
+               members: list[int], lot_ids: list[int], *,
+               extra_tests: tuple[str, ...] = ()) -> list[dict]:
     """Wiersze testów klastra: tylko encje klastra (członkowie, pary członków, części
     klastra, sam klaster) i wynik całego rynku, wybrane po kluczu (indeks PK), a nie cały
-    rynek przefiltrowany w Pythonie."""
+    rynek przefiltrowany w Pythonie. `extra_tests`: testy spoza katalogu (np. `bzp.*`)."""
     firms = [firm_key(m, market_id) for m in members]
     pairs = [pair_key(a, b, market_id)
              for i, a in enumerate(members) for b in members[i + 1:]]
@@ -227,8 +256,9 @@ def _test_rows(conn: psycopg.Connection, run_id: int, cluster_id: str, market_id
         "  or (level = 'pair' and entity_key = any(%(pairs)s))"
         "  or (level = 'lot' and entity_key = any(%(lots)s)))"
         " order by test_id, level, entity_key",
-        {"run": run_id, "items": list(CHECKED), "cid": cluster_id, "market": market_id,
-         "firms": firms, "pairs": pairs, "lots": [str(i) for i in lot_ids]},
+        {"run": run_id, "items": [*CHECKED, *extra_tests], "cid": cluster_id,
+         "market": market_id, "firms": firms, "pairs": pairs,
+         "lots": [str(i) for i in lot_ids]},
     ).fetchall()
 
 
@@ -284,6 +314,12 @@ def _oecd(rows: list[dict], market_id: str, key_of: dict[int, str],
             "mean": _num(statistics.fmean(values)) if values else None,
             "high": sum(1 for p in pcts if p >= HIGH_PCT),
         }
+    # Testy BZP-only (`bzp.*`) idą pod swój punkt OECD z polem `test`, gdy ten punkt nie ma
+    # wyniku z ofert z dokumentów otwarcia.
+    for test_id in BZP_TESTS:
+        result = out.pop(test_id, None)
+        if result is not None and OECD_ITEM[test_id] not in out:
+            out[OECD_ITEM[test_id]] = {**result, "test": test_id}
     return dict(sorted(out.items()))
 
 
@@ -323,12 +359,13 @@ def _fit(evidence: dict) -> dict:
 def build_evidence(conn: psycopg.Connection, run_id: int, cluster_id: str) -> dict:
     """Pakiet dowodów klastra `cluster_id` z przebiegu `run_id` (kształt w opisie modułu)."""
     cluster = conn.execute(
-        "select cluster_id, market_id, members, n_lots from clusters"
+        "select cluster_id, market_id, members, n_lots, buyers from clusters"
         " where run_id = %s and cluster_id = %s",
         (run_id, cluster_id),
     ).fetchone()
     if cluster is None:
         raise LookupError(f"cluster {cluster_id} not found in run {run_id}")
+    winners = is_winner_cluster(cluster_id)
     market_id = cluster["market_id"]
     members = sorted({int(m) for m in (cluster["members"] or [])})
     key_of = {bidder_id: _key(i) for i, bidder_id in enumerate(members)}
@@ -337,7 +374,10 @@ def build_evidence(conn: psycopg.Connection, run_id: int, cluster_id: str) -> di
         "select market_id, cpv_group, province, level, n_lots from markets where market_id = %s",
         (market_id,),
     ).fetchone()
-    lots = _cluster_lots(conn, market_id, members)
+    if winners:
+        lots = _winner_lots(conn, market_id, members, cluster["buyers"])
+    else:
+        lots = _cluster_lots(conn, market_id, members)
     days = [r["day"] for r in lots if r["day"] is not None]
     total = sum(
         (r["contract_value"] if r["contract_value"] is not None else r["price_winner"])
@@ -345,7 +385,8 @@ def build_evidence(conn: psycopg.Connection, run_id: int, cluster_id: str) -> di
         for r in lots
     )
     rows = _test_rows(conn, run_id, cluster_id, market_id, members,
-                      [r["lot_id"] for r in lots])
+                      [r["lot_id"] for r in lots],
+                      extra_tests=BZP_TESTS if winners else ())
     # Bez wiersza `markets` grupa CPV i województwo z identyfikatora `poziom:grupa:woj`.
     parts = (market_id or "").split(":")
     cpv_group = market["cpv_group"] if market else (parts[1] if len(parts) > 1 else None)
@@ -374,4 +415,6 @@ def build_evidence(conn: psycopg.Connection, run_id: int, cluster_id: str) -> di
         "oecd": _oecd(rows, market_id, key_of, {r["lot_id"] for r in lots}),
         "lots": [_lot_entry(r, key_of) for r in lots[-MAX_LOTS:]],
     }
+    if winners:
+        evidence["basis"] = BASIS_WINNERS
     return _fit(evidence)

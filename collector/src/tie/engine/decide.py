@@ -20,7 +20,15 @@ zadziałał (obecny w dowodach, bez flagi `signal = false`, `p_i >= 0.6`), jest 
 `review`. Punkty 3.1.1, 3.3.3, 3.3.9, 3.1.5, 3.3.7 (`WEAK_ITEMS`) same w sobie są "słabe"
 (często wygrywa, małe obniżki, cena ponad szacunek, nigdy nie wygrywa, luka cenowa): nie
 wystarczą do publikacji, nawet gdy `ENGINE_MAX_STATUS` na nią pozwala. Wynik bramki trafia
-do `signals.evidence.decision.gate` (`ok`, `min_lots`, `min_buyers`, `weak_only`).
+do `signals.evidence.decision.gate` (`ok`, `min_lots`, `min_buyers`, `weak_only`,
+`single_buyer_rotation`).
+
+Klastry zwycięzców z testów BZP-only (`cluster_id` z prefiksem `w:`, `tie.engine.bzp_only`):
+te same progi, ale rotacja zwycięzców u jednego zamawiającego wystarcza zamiast 2
+zamawiających, gdy klaster ma co najmniej 10 części (`single_buyer_rotation`); mocne są tylko
+`bzp.winner_rotation` z percentylem co najmniej 0.99 (punkt 3.1.6) i `bzp.shared_winners`
+(3.2.11), `bzp.spread` (3.3.7) i `bzp.over_estimate` (3.3.9) zostają słabe. Status takiego
+klastra jest zawsze co najwyżej `review`, także przy `ENGINE_MAX_STATUS=published`.
 
 Błędy Jev: odpowiedź 4xx inna niż 429 (zły klucz, zły kształt zapytania, zła nazwa modelu)
 wyłącza Jev do końca przebiegu, tak samo przekroczony budżet i kilka kolejnych błędów innego
@@ -44,6 +52,7 @@ from psycopg.types.json import Jsonb
 
 from tie.ai.providers import BudgetExceeded, ProviderHttpError
 from tie.config import ENGINE_STATUSES, engine_max_status, engine_min_lots
+from tie.engine.bzp_only import OECD_ITEM, STRONG_MIN_PCT, TEST_ROTATION, is_winner_cluster
 from tie.engine.evidence import CHECKED, build_evidence, evidence_hash, present_items
 from tie.engine.oecd import CATALOG
 
@@ -79,6 +88,11 @@ GATE_OK = "ok"
 GATE_MIN_LOTS = "min_lots"
 GATE_MIN_BUYERS = "min_buyers"
 GATE_WEAK_ONLY = "weak_only"
+GATE_SINGLE_BUYER = "single_buyer_rotation"
+# Klaster zwycięzców z rotacją u jednego zamawiającego: tyle części zamiast 2 zamawiających.
+SINGLE_BUYER_MIN_LOTS = 10
+# Klastry zwycięzców (tylko BZP, bez ofert z dokumentów) nigdy nie są publikowane.
+WINNER_CLUSTER_MAX_STATUS = "review"
 # Regresja zapasowa: stałe wagi na wejściach testów (percentyl 0..1), wyraz wolny.
 FALLBACK_WEIGHTS = {
     "3.1.6": 2.0,
@@ -288,26 +302,57 @@ def status_for(decision: Decision, publish_threshold: float, review_threshold: f
     return cap_status(status, max_status)
 
 
+def _strong_enough(numbers: dict) -> bool:
+    """Punkt z testu BZP-only (pole `test`) jest mocny dopiero od percentyla
+    `bzp_only.STRONG_MIN_PCT` tego testu (rotacja zwycięzców: 0.99)."""
+    floor = STRONG_MIN_PCT.get(numbers.get("test"))
+    if floor is None:
+        return True
+    pct = numbers.get("pct")
+    return pct is not None and float(pct) >= floor
+
+
 def strong_items_fired(decision: Decision, evidence: dict) -> list[str]:
     """Mocne punkty, które zadziałały: obecne w dowodach (`present_items`), bez flagi
-    `signal = false` i z prawdopodobieństwem decyzji co najmniej `STRONG_ITEM_FLOOR`."""
+    `signal = false`, z prawdopodobieństwem decyzji co najmniej `STRONG_ITEM_FLOOR`,
+    a dla testów BZP-only także z percentylem co najmniej `STRONG_MIN_PCT`."""
     present = present_items(evidence)
     return sorted(
         item for item in STRONG_ITEMS
         if item in present and present[item].get("signal") is not False
         and decision.per_item.get(item, 0.0) >= STRONG_ITEM_FLOOR
+        and _strong_enough(present[item])
     )
 
 
+def _buyer_rotation(evidence: dict) -> bool:
+    """Klaster zwycięzców z rotacją u zamawiającego (`bzp.winner_rotation` w dowodach)."""
+    numbers = (evidence.get("oecd") or {}).get(OECD_ITEM[TEST_ROTATION])
+    return isinstance(numbers, dict) and numbers.get("test") == TEST_ROTATION
+
+
 def evidence_gate(decision: Decision, evidence: dict, min_lots: int) -> tuple[str, str]:
-    """(wynik bramki, najwyższy dozwolony status) dla minimalnych dowodów klastra."""
-    if int(evidence.get("n_lots") or 0) < min_lots:
+    """(wynik bramki, najwyższy dozwolony status) dla minimalnych dowodów klastra.
+
+    Klaster zwycięzców (`w:`, `tie.engine.bzp_only`) ma te same progi, z jednym wyjątkiem:
+    rotacja u jednego zamawiającego przechodzi bramkę zamawiających przy co najmniej
+    `SINGLE_BUYER_MIN_LOTS` częściach (wynik `single_buyer_rotation`). Taki klaster jest
+    zawsze co najwyżej `review` (`WINNER_CLUSTER_MAX_STATUS`)."""
+    winners = is_winner_cluster(evidence.get("cluster_id"))
+    n_lots = int(evidence.get("n_lots") or 0)
+    if n_lots < min_lots:
         return GATE_MIN_LOTS, "hidden"
+    single_buyer = False
     if int(evidence.get("n_buyers") or 0) < MIN_BUYERS:
-        return GATE_MIN_BUYERS, "hidden"
+        if not (winners and _buyer_rotation(evidence) and n_lots >= SINGLE_BUYER_MIN_LOTS):
+            return GATE_MIN_BUYERS, "hidden"
+        single_buyer = True
     if not strong_items_fired(decision, evidence):
         return GATE_WEAK_ONLY, "review"
-    return GATE_OK, "published"
+    gate = GATE_SINGLE_BUYER if single_buyer else GATE_OK
+    if winners:
+        return gate, WINNER_CLUSTER_MAX_STATUS
+    return gate, "published"
 
 
 def final_status(decision: Decision, evidence: dict, publish_threshold: float,
