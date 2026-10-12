@@ -154,6 +154,12 @@ def cmd_stats(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_gold_kio(args: argparse.Namespace) -> int:
+    from tie.gold import kio  # imported here: the command stays self-contained
+
+    return kio.cli_main(load_settings(), args.only)
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="tie", description="Tender Integrity Engine collector")
     sub = p.add_subparsers(dest="command", required=True)
@@ -173,6 +179,10 @@ def build_parser() -> argparse.ArgumentParser:
     w.set_defaults(func=cmd_worker)
 
     sub.add_parser("stats", help="print counts as JSON").set_defaults(func=cmd_stats)
+
+    g = sub.add_parser("gold-kio", help="gold labels from KIO rulings on collusion")
+    g.add_argument("--only", help="one curated ruling, e.g. 'KIO 2378/21'")
+    g.set_defaults(func=cmd_gold_kio)
     return p
 
 
