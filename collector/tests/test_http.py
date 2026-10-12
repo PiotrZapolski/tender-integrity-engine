@@ -82,3 +82,16 @@ def test_post_json_sends_body_and_headers():
     assert req.headers["X-Key"] == "k"
     assert req.headers["User-Agent"] == "ua-test"
     assert json.loads(req.content) == {"a": 1}
+
+
+@respx.mock
+def test_retry_after_capped_by_default():
+    sleeps = []
+    respx.get("https://example.com/f").mock(side_effect=[
+        httpx.Response(429, headers={"Retry-After": "86400"}),
+        httpx.Response(200, text="ok"),
+    ])
+    r = make(sleeps).get("https://example.com/f")
+    assert r.text == "ok"
+    assert 300.0 in sleeps
+    assert 86400 not in sleeps

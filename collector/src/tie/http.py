@@ -28,8 +28,9 @@ class PoliteClient:
 
     def __init__(self, user_agent: str, rates: dict[str, float], *, max_retries: int = 5,
                  base_delay: float = 1.0, sleep=time.sleep, timeout: float = 60.0,
-                 clock=time.monotonic):
+                 clock=time.monotonic, max_retry_after: float = 300.0):
         self.rates = dict(rates)
+        self.max_retry_after = max_retry_after
         self.max_retries = max_retries
         self.base_delay = base_delay
         self.sleep = sleep
@@ -64,7 +65,7 @@ class PoliteClient:
             if r is not None:
                 retry_after = r.headers.get("Retry-After", "").strip()
                 if retry_after.isdigit():
-                    delay = float(retry_after)
+                    delay = min(float(retry_after), self.max_retry_after)
             self.sleep(delay)
         raise HttpGiveUp(url, status)
 
