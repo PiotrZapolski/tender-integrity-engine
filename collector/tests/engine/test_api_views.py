@@ -62,6 +62,14 @@ CONTRACT = {
         ("item", "text"), ("section", "text"), ("title", "text"), ("status", "text"),
         ("how", "text"),
     ],
+    "validation": [
+        ("calibration_id", "int8"), ("run_at", "timestamptz"), ("kind", "text"),
+        ("position", "int4"), ("source", "text"), ("case_key", "text"), ("name", "text"),
+        ("year", "int4"), ("sector", "text"), ("region", "text"), ("decision", "text"),
+        ("detected", "bool"), ("status", "text"), ("reason", "text"),
+        ("oecd_items", "_text"), ("percentile", "float8"), ("probability", "float8"),
+        ("firms", "jsonb"), ("detail", "jsonb"), ("metrics", "jsonb"), ("params", "jsonb"),
+    ],
 }
 
 _FOLD = str.maketrans("ĄĆĘŁŃÓŚŹŻąćęłńóśźż", "ACELNOSZZacelnoszz")

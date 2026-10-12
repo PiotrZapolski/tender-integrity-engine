@@ -1,5 +1,5 @@
 """`tie` command line: migrate, backfill, daily, engine-run, worker, stats, gold-extract,
-gold-export, gold-kio."""
+gold-export, gold-kio, validate."""
 
 from __future__ import annotations
 
@@ -229,6 +229,25 @@ def cmd_gold_export(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_validate(args: argparse.Namespace) -> int:
+    # Imported here: the harness pulls in the engine (igraph), which other commands never need.
+    from tie.validation.report import markdown_summary, run_validation
+
+    with _connect() as conn:
+        report = run_validation(conn, as_of=args.as_of or today(), sample=args.sample,
+                                seed=args.seed)
+    summary = markdown_summary(report)
+    if args.write_report:
+        path = Path(args.write_report)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+                        encoding="utf-8")
+        path.with_suffix(".md").write_text(summary, encoding="utf-8")
+        log.info("validate: report written to %s and %s", path, path.with_suffix(".md"))
+    print(summary)
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="tie", description="Tender Integrity Engine collector")
     sub = p.add_subparsers(dest="command", required=True)
@@ -269,6 +288,16 @@ def build_parser() -> argparse.ArgumentParser:
     e = sub.add_parser("gold-export", help="write gold_cases to a JSON file")
     e.add_argument("path", help="output file, for example validation/gold/uokik.json")
     e.set_defaults(func=cmd_gold_export)
+
+    v = sub.add_parser("validate",
+                       help="validate the engine on the gold set, store a calibration run")
+    v.add_argument("--write-report", metavar="PATH",
+                   help="write the JSON report to PATH and a markdown summary next to it")
+    v.add_argument("--as-of", type=_date, help="end of the background window (default: today)")
+    v.add_argument("--sample", type=int, default=200,
+                   help="control clusters sampled for test C (default: 200)")
+    v.add_argument("--seed", type=int, default=20261012, help="seed of the test C sample")
+    v.set_defaults(func=cmd_validate)
     return p
 
 
