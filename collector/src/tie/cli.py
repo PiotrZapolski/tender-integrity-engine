@@ -1,4 +1,4 @@
-"""`tie` command line: migrate, backfill, daily, worker, stats."""
+"""`tie` command line: migrate, backfill, daily, worker, stats, gold-extract, gold-export."""
 
 from __future__ import annotations
 
@@ -9,11 +9,14 @@ import signal
 import sys
 import time
 from datetime import UTC, date, datetime, timedelta
+from pathlib import Path
 
 import psycopg
 
 from tie.config import load_settings
 from tie.db import connect, migrate
+from tie.gold.extract import GOLD_RATES, export_gold, run_gold_extract
+from tie.gold.sources import UOKIK_DECISIONS, get_decision
 from tie.handlers import Context, run_once
 from tie.identity.bidders import MAX_IDENTITY_FAILURES
 from tie.jobs import enqueue, requeue_stale
@@ -154,6 +157,37 @@ def cmd_stats(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_gold_extract(args: argparse.Namespace) -> int:
+    if args.only:
+        try:
+            decisions = (get_decision(args.only),)
+        except KeyError:
+            log.error("gold-extract: unknown decision %r (see tie.gold.sources)", args.only)
+            return 2
+    else:
+        decisions = UOKIK_DECISIONS
+    settings = load_settings()
+    if not settings.deepseek_api_key:
+        log.error("gold-extract: DEEPSEEK_API_KEY is not set")
+        return 2
+    ctx = Context.from_settings(settings)
+    ctx.client.rates.update(GOLD_RATES)
+    try:
+        summary = run_gold_extract(ctx.conn, ctx.client, ctx.rawstore, ctx.text_provider,
+                                   decisions, force=args.force)
+    finally:
+        ctx.close()
+    print(json.dumps(summary, ensure_ascii=False, sort_keys=True))
+    return 1 if summary["failed"] or summary["budget_exceeded"] else 0
+
+
+def cmd_gold_export(args: argparse.Namespace) -> int:
+    with _connect() as conn:
+        n = export_gold(conn, Path(args.path))
+    log.info("gold-export: %d cases written to %s", n, args.path)
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="tie", description="Tender Integrity Engine collector")
     sub = p.add_subparsers(dest="command", required=True)
@@ -173,6 +207,16 @@ def build_parser() -> argparse.ArgumentParser:
     w.set_defaults(func=cmd_worker)
 
     sub.add_parser("stats", help="print counts as JSON").set_defaults(func=cmd_stats)
+
+    g = sub.add_parser("gold-extract",
+                       help="structure UOKiK bid-rigging decisions into gold_cases (DeepSeek)")
+    g.add_argument("--only", metavar="ID", help="one decision, for example RLU-7/2023")
+    g.add_argument("--force", action="store_true", help="extract again decisions already stored")
+    g.set_defaults(func=cmd_gold_extract)
+
+    e = sub.add_parser("gold-export", help="write gold_cases to a JSON file")
+    e.add_argument("path", help="output file, for example validation/gold/uokik.json")
+    e.set_defaults(func=cmd_gold_export)
     return p
 
 
