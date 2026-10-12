@@ -132,6 +132,8 @@ class DeepSeekText:
             ],
             "response_format": {"type": "json_object"},
             "temperature": 0,
+            # Long multi-lot documents need more than the 4k default output.
+            "max_tokens": 8192,
         }
         data, latency_ms = _post(self.client, self.budget, provider=self.PROVIDER,
                                  model=self.model, task=task, url=self.URL,

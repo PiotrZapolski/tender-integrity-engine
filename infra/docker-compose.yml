@@ -38,7 +38,20 @@ services:
   worker-ezam:
     image: tie-collector
     env_file: .env
-    command: ["tie", "worker", "--kinds", "bzp_day,ezam_docs,ezam_download"]
+    command: ["tie", "worker", "--kinds", "ezam_docs,ezam_download"]
+    volumes: ["${RAW_HOST_DIR:-./data/raw}:/data/raw"]
+    depends_on: { migrate: { condition: service_completed_successfully } }
+    cpus: 1
+    mem_limit: 2g
+    restart: unless-stopped
+    stop_grace_period: 2m
+  # BZP days get their own process so the 2021+ backfill is not queued behind thousands of
+  # document downloads. Together with worker-ezam this is 2 requests/s to ezamowienia.gov.pl;
+  # its WAF 403s are retried.
+  worker-bzp:
+    image: tie-collector
+    env_file: .env
+    command: ["tie", "worker", "--kinds", "bzp_day"]
     volumes: ["${RAW_HOST_DIR:-./data/raw}:/data/raw"]
     depends_on: { migrate: { condition: service_completed_successfully } }
     cpus: 1

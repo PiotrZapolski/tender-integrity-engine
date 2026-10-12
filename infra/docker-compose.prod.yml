@@ -9,3 +9,5 @@ services:
     volumes: ["/var/www/tie/data/raw:/data/raw"]
     environment:
       AI_DAILY_BUDGET_USD: "15.0"
+  worker-bzp:
+    volumes: ["/var/www/tie/data/raw:/data/raw"]
