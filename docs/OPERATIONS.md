@@ -24,8 +24,14 @@ Production runs on one box under `/var/www/tie/`, as a Docker Compose project na
 
 - `cron` (supercronic, `collector/crontab`) runs `tie daily` at 23:00 UTC (01:00 in Poland
   during summer time), `tie engine-run` at 02:30 UTC and `tie stats` every 30 minutes.
-- `worker` runs `tie worker`. Keep exactly one `worker` replica: the budget and dedup logic
-  assume a single worker. Do not use `--scale worker=N`.
+- Workers are split by job kind so one slow host never blocks the rest:
+  - `worker-ezam`: `bzp_day`, `ezam_docs`, `ezam_download` (the only process talking to
+    ezamowienia.gov.pl, so its 2 s gap holds). Keep one replica.
+  - `worker-parse` (3 replicas): `opening_parse` (text extraction, OCR, DeepSeek). Jobs are
+    claimed with `FOR UPDATE SKIP LOCKED`; the daily AI budget can be overshot by at most the
+    calls in flight (3).
+  - `worker`: ezamawiajacy, identity (Jev), whitelist, MSiG, engine. Keep one replica: each
+    external host must be served by exactly one process so per-host rate limits hold.
 - `migrate` runs `tie migrate` once on every `up`, before `worker` and `cron` start.
 
 ## Engine
@@ -167,7 +173,32 @@ select status, count(*) from documents where doc_type = 'opening' group by 1 ord
 select count(*) filter (where outside_bzp_range) outside, count(*) bids from bids;
 ```
 
-The same works for `needs_review` documents. Bids that fail during identity matching are
+The same works for `needs_review` documents. After a parser release that changes what can
+be read (for example per-lot acceptance, the `bzp_partial` rule, `.doc`/`.odt` support or
+the OCR orientation fix), re-queue both kinds in one go:
+
+```sql
+insert into jobs(kind, key, payload)
+select 'opening_parse', source_doc_id || '@reparse-' || to_char(now(), 'YYYYMMDDHH24MI'),
+       jsonb_build_object('document_id', id)
+from documents
+where status in ('mismatch', 'needs_review') and doc_type = 'opening'
+  and coalesce(error, '') <> 'raw_missing'
+on conflict (kind, key) do nothing;
+```
+
+Each re-parsed document makes at most one DeepSeek call (`AI_DAILY_BUDGET_USD` still
+applies). `parsed` documents with `error` starting with `partial:` have bids for the lots
+that passed and none for the lots listed after `partial:` (`partial` in `tie stats`); the
+`notes:` part names the relaxed cross-check rules that were used (`bzp_partial`,
+`winner_by_price`, `winner_unscaled`, `bzp_no_winner`, `lot_offset:<d>`). Watch the result:
+
+```sql
+select status, split_part(error, ':', 1) kind, count(*) from documents
+where doc_type = 'opening' group by 1, 2 order by 1, 3 desc;
+```
+
+Bids that fail during identity matching are
 logged (`identity: bid <id> skipped`) and retried by the next `identity` job; they never
 block the other bids. Each failed run increments `bids.identity_failures`; after 3 failed
 runs the bid is excluded from matching (`bids_identity_excluded` in `tie stats`). A rejected
@@ -178,6 +209,30 @@ API change), give the excluded bids another chance:
 ```sql
 update bids set identity_failures = 0 where bidder_id is null;
 ```
+
+## Opening documents from ezamawiajacy.pl
+
+Procedures on the Marketplanet platform (`procedures.platform = 'ezamawiajacy'`) get an
+`ezamawiajacy_docs` job when BZP field 1.6 links to the procedure page
+(`/pn/<buyer>/demand/<id>/notice/public/details`) and a lot has at least 2 offers. A link to
+the buyer's home page only cannot be followed and is skipped. All `*.ezamawiajacy.pl` hosts
+share one gap of 5 s between requests; robots.txt of each host is read first and obeyed
+(a disallowed download leaves the document with `status = 'blocked'`). Files go to the raw
+store folder `ezamawiajacy`.
+
+Procedures stored before this collector existed need the jobs queued once:
+
+```sql
+insert into jobs(kind, key, payload)
+select 'ezamawiajacy_docs', p.ocds_id, jsonb_build_object('ocds_id', p.ocds_id)
+from procedures p
+where p.platform = 'ezamawiajacy'
+  and p.platform_url ~ '/pn/[^/]+/demand/(\d+/notice/public|notice/public/\d+)/details/?$'
+  and exists (select 1 from lots l where l.procedure_id = p.ocds_id and l.n_offers >= 2)
+on conflict (kind, key) do nothing;
+```
+
+The job reads the URL from `procedures.platform_url` when the payload has none.
 
 ## Backup
 
@@ -190,4 +245,10 @@ update bids set identity_failures = 0 where bidder_id is null;
 - API keys (`JEV_API_KEY`, `DEEPSEEK_API_KEY`) live only in `/var/www/tie/infra/.env` on the
   server. Never commit them and never log them.
 - Rotate the Jev key after the hackathon.
+- `PERSON_HMAC_SECRET` keys the MSiG person hashes (`board_links.person_key`, see
+  `docs/msig.md`). Generate it once (`openssl rand -hex 32`), keep it only in `.env` and in
+  the owner's password manager. While it is unset, `tie daily` queues no `msig_board` jobs.
+  Changing it changes every key: after a change run
+  `truncate board_links, msig_announcements; update bidders set msig_checked_at = null;`
+  and let the daily jobs rebuild the links.
 - Never edit tracked files on the server; change the repo and redeploy.

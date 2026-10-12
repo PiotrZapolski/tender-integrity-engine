@@ -60,6 +60,21 @@ def test_rate_limit_spacing():
 
 
 @respx.mock
+def test_rate_limit_shared_by_subdomains():
+    sleeps = []
+    respx.get("https://a.platform.pl/x").mock(return_value=httpx.Response(200))
+    respx.get("https://b.platform.pl/x").mock(return_value=httpx.Response(200))
+    respx.get("https://other.pl/x").mock(return_value=httpx.Response(200))
+    times = iter([100.0, 100.0, 101.0, 101.0, 101.0, 101.0])
+    c = PoliteClient("ua", {"platform.pl": 5.0}, sleep=sleeps.append, clock=lambda: next(times))
+    c.get("https://a.platform.pl/x")
+    c.get("https://b.platform.pl/x")
+    assert sleeps == [4.0]
+    c.get("https://other.pl/x")
+    assert sleeps == [4.0]
+
+
+@respx.mock
 def test_transport_error_retried_then_give_up_with_none_status():
     sleeps = []
     route = respx.get("https://example.com/e").mock(side_effect=httpx.ConnectError("boom"))
@@ -128,4 +143,5 @@ def test_handlers_configure_ezamowienia_waf_retry():
     from tie.handlers import RATES, RETRY_STATUSES_BY_HOST
 
     assert RATES["ezamowienia.gov.pl"] == 2.0
+    assert RATES["ezamawiajacy.pl"] == 5.0
     assert RETRY_STATUSES_BY_HOST == {"ezamowienia.gov.pl": {403}}

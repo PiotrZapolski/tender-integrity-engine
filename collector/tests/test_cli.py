@@ -35,7 +35,7 @@ def job(db, kind):
 
 def test_handlers_registered():
     assert {"bzp_day", "ezam_docs", "ezam_download", "opening_parse", "identity",
-            "whitelist"} <= set(HANDLERS)
+            "whitelist", "ezamawiajacy_docs", "ezamawiajacy_download"} <= set(HANDLERS)
 
 
 def test_backfill_enqueues_days(db, dburl):
@@ -75,6 +75,24 @@ def test_stats(db, dburl, capsys):
     assert out["jobs"] == {"bzp_day": {"queued": 1}}
     assert out["ai_cost_today_usd"] == 0
     assert out["bids_identity_excluded"] == 0
+    assert out["partial"] == 0
+
+
+def test_stats_counts_partially_parsed_documents(db, dburl, capsys):
+    db.execute("insert into procedures(ocds_id, bzp_number, notice_number, title, published_at)"
+               " values ('o','b','n','t', now())")
+    for i, (status, error) in enumerate([
+            ("parsed", None), ("parsed", "partial: lot3:prices"),
+            ("parsed", "partial: lot2:count; notes: bzp_partial"), ("parsed", "notes: bzp_partial"),
+            ("mismatch", "lot1:count")]):
+        db.execute("insert into documents(procedure_id, source, source_doc_id, file_name,"
+                   " doc_type, status, error) values ('o', 'ezamowienia', %s, 'f.pdf',"
+                   " 'opening', %s, %s)", (f"d{i}", status, error))
+    db.commit()
+    assert cli.main(["stats"]) == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["documents"] == {"mismatch": 1, "parsed": 4}
+    assert out["partial"] == 2
 
 
 def test_stats_counts_identity_excluded_bids(db, dburl, capsys):
