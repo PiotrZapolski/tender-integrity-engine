@@ -39,7 +39,7 @@ log = logging.getLogger(__name__)
 # Minimal gap in seconds between two requests to a host (Global Constraints).
 RATES: dict[str, float] = {
     # Above the 1 request/s default: the e-Zamowienia WAF throttles (HTTP 403) under load.
-    "ezamowienia.gov.pl": 2.0,
+    "ezamowienia.gov.pl": 1.0,
     "wl-api.mf.gov.pl": 2.0,
     "api.typesafe.ai": 0.1,
     "api.deepseek.com": 0.2,

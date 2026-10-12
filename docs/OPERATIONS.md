@@ -26,7 +26,7 @@ Production runs on one box under `/var/www/tie/`, as a Docker Compose project na
   during summer time), `tie engine-run` at 02:30 UTC and `tie stats` every 30 minutes.
 - Workers are split by job kind so one slow host never blocks the rest:
   - `worker-ezam`: `bzp_day`, `ezam_docs`, `ezam_download` (the only process talking to
-    ezamowienia.gov.pl, so its 2 s gap holds). Keep one replica.
+    ezamowienia.gov.pl, so its 1 s gap holds). Keep one replica.
   - `worker-parse` (3 replicas): `opening_parse` (text extraction, OCR, DeepSeek). Jobs are
     claimed with `FOR UPDATE SKIP LOCKED`; the daily AI budget can be overshot by at most the
     calls in flight (3).
