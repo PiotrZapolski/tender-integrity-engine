@@ -18,6 +18,11 @@ class Settings:
     deepseek_model: str
     ai_daily_budget_usd: float
     wl_daily_cap: int
+    # HMAC key for MSiG person keys (tie.identity.msig). No default value: msig_board jobs
+    # refuse to run and `tie daily` does not queue them while it is unset.
+    person_hmac_secret: str | None = None
+    msig_daily_cap: int = 500
+    msig_recheck_days: int = 180
 
 
 def load_settings(env: Mapping[str, str] | None = None) -> Settings:
@@ -31,4 +36,7 @@ def load_settings(env: Mapping[str, str] | None = None) -> Settings:
         deepseek_model=e.get("DEEPSEEK_MODEL", "deepseek-chat"),
         ai_daily_budget_usd=float(e.get("AI_DAILY_BUDGET_USD", "5.0")),
         wl_daily_cap=int(e.get("WL_DAILY_CAP", "90")),
+        person_hmac_secret=e.get("PERSON_HMAC_SECRET") or None,
+        msig_daily_cap=int(e.get("MSIG_DAILY_CAP", "500")),
+        msig_recheck_days=int(e.get("MSIG_RECHECK_DAYS", "180")),
     )

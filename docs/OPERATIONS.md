@@ -114,4 +114,10 @@ update bids set identity_failures = 0 where bidder_id is null;
 - API keys (`JEV_API_KEY`, `DEEPSEEK_API_KEY`) live only in `/var/www/tie/infra/.env` on the
   server. Never commit them and never log them.
 - Rotate the Jev key after the hackathon.
+- `PERSON_HMAC_SECRET` keys the MSiG person hashes (`board_links.person_key`, see
+  `docs/msig.md`). Generate it once (`openssl rand -hex 32`), keep it only in `.env` and in
+  the owner's password manager. While it is unset, `tie daily` queues no `msig_board` jobs.
+  Changing it changes every key: after a change run
+  `truncate board_links, msig_announcements; update bidders set msig_checked_at = null;`
+  and let the daily jobs rebuild the links.
 - Never edit tracked files on the server; change the repo and redeploy.
