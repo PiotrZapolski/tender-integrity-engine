@@ -216,7 +216,7 @@ def test_budget_and_transport_errors_propagate(db, error):
     if isinstance(error, RuntimeError):
         error.__cause__ = HttpGiveUp("https://jev", 503)
     seed_known_bidder(db)
-    poison_id, good_id = seed_bids(db, [(POISON, None), (GOOD, None)])
+    seed_bids(db, [(POISON, None), (GOOD, None)])
     jev = PoisonJev("0", 0.93, error=error)
     with pytest.raises(type(error)):
         resolve_unmatched_bids(db, jev)
