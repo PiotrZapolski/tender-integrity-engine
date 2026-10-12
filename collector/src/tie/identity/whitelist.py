@@ -55,10 +55,19 @@ def _reserve_request(conn: psycopg.Connection, today: date, daily_cap: int) -> b
 
 
 def _pending(conn: psycopg.Connection, limit: int) -> list[dict]:
+    """Wykonawcy do sprawdzenia, w kolejności ważności dla silnika (dzienny limit MF decyduje,
+    kto dostanie rachunki i adres pierwszy): najpierw najwięcej wygranych części
+    (`lots.winner_bidder_id`), potem obecni w ofertach (`bids`), potem reszta; w obrębie
+    grupy rosnąco po `id`."""
     rows = conn.execute(
-        "select b.id, b.nip from bidders b"
+        "with wins as ("
+        "  select l.winner_bidder_id as bidder_id, count(*) as n from lots l"
+        "  where l.winner_bidder_id is not null group by l.winner_bidder_id)"
+        " select b.id, b.nip from bidders b"
+        " left join wins w on w.bidder_id = b.id"
         " where b.nip is not null and b.wl_checked_at is null"
-        " order by exists (select 1 from bids x where x.bidder_id = b.id) desc, b.id"
+        " order by coalesce(w.n, 0) desc,"
+        "  exists (select 1 from bids x where x.bidder_id = b.id) desc, b.id"
         " limit %s",
         (limit,),
     ).fetchall()

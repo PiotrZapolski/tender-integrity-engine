@@ -1,9 +1,10 @@
 """One engine run: markets, co-bidder graph, OECD tests, signals and explanations.
 
 `run_engine` opens a new `engine_runs` row and executes every step in order under its
-`run_id`: OECD catalog seed, markets, pairs, clusters, lot/firm/pair/market tests, signals,
-explanations of published signals that have none for their current evidence. Each step is
-committed on its own; the step counters land in `engine_runs.params["counts"]` and the
+`run_id`: OECD catalog seed, markets, pairs, clusters, lot/firm/pair/market tests, BZP-only
+screens with their winner-based clusters (`tie.engine.bzp_only`), signals, explanations of
+published signals that have none for their current evidence. Each step is committed on its
+own; the step counters land in `engine_runs.params["counts"]` and the
 status becomes `done`. Any error marks the run `failed` (with the step and the error) and
 re-raises, so the job queue retries it.
 
@@ -27,6 +28,7 @@ import psycopg
 from psycopg.types.json import Jsonb
 
 from tie.config import engine_max_status, engine_min_lots
+from tie.engine.bzp_only import compute_bzp_only
 from tie.engine.decide import upsert_signals
 from tie.engine.explain import explain_signal
 from tie.engine.graph import build_pairs, find_clusters
@@ -178,6 +180,8 @@ def run_engine(ctx, as_of: date, *, full: bool = False) -> dict:
             ("firm_tests", lambda: compute_firm_tests(conn, run_id)),
             ("pair_tests", lambda: compute_pair_tests(conn, run_id)),
             ("market_tests", lambda: compute_market_tests(conn, run_id)),
+            # After `clusters`: find_clusters replaces every cluster of the run.
+            ("bzp_only", lambda: compute_bzp_only(conn, run_id)),
             ("signals", lambda: upsert_signals(conn, run_id, ctx.decider,
                                                max_status=max_status, min_lots=min_lots)),
             ("explanations", lambda: _explain_published(conn, ctx.text_provider)),
