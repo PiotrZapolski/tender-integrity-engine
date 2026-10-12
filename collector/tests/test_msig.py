@@ -17,7 +17,6 @@ from tie.identity.msig import (
     SEARCH_URL,
     birth_year,
     enqueue_due,
-    normalize_full_name,
     parse_announcement,
     person_key,
     search_announcements,
@@ -28,14 +27,15 @@ from tie.jobs import enqueue
 
 KRS = "0000047217"
 SECRET = "test-secret-not-for-production"
-IDS = [9263478, 8953421, 8788047, 5958037, 5938641, 5944222, 5025160, 2300354, 18606798]
+IDS = [7552055, 10122246, 10841550, 9263478, 8953421, 8788047, 5958037, 5938641, 5944222,
+       5025160, 2300354, 18606798]
 # Fake, checksum-valid PESEL numbers used in the redacted fixtures, by fake surname.
 FAKE = {
     "NOWAKOWSKI": "72031501234", "ZIELIŃSKI": "80112004565", "ŁĄCKA": "65050507891",
     "KOWALCZYK": "02211507897", "WIŚNIEWSKI": "75070702341", "DĄBROWSKA": "58122403456",
     "LEWANDOWSKI": "83041205678", "WÓJCIK": "69090906784", "MAZUR": "77010108909",
     "KAMIŃSKI": "61060609015", "SZYMAŃSKA": "85080810127", "WOŹNIAK": "90022810123",
-    "KRAWCZYK": "91051504568",
+    "KRAWCZYK": "91051504568", "GRABOWSKI": "87060612349",
 }
 
 
@@ -70,37 +70,53 @@ def test_birth_year():
     assert birth_year("58122403456") == 1958
 
 
-def test_normalize_full_name():
-    # Diacritics, case, spacing and OCR-split words do not change the normalized name.
-    assert normalize_full_name("ŁĄCKA", "ANNA MARIA") == "LACKA ANNA"
-    assert normalize_full_name("ZIELIŃS KI", "PIOTR  MAREK") == "ZIELINSKI PIOTR"
-    assert normalize_full_name("Kowalska-Nowak", "Ewa") == "KOWALSKANOWAK EWA"
-    # Only the first given name counts: MSiG lists the same person (same PESEL) once as
-    # "MARTA MARIA" and once as "MARTA".
-    assert normalize_full_name("MAZUR", "MARTA MARIA") == normalize_full_name("MAZUR", "MARTA")
-
-
 def test_person_key_deterministic():
-    k1 = person_key(SECRET, "MAZUR", "MARTA MARIA", "77010108909")
-    assert k1 == person_key(SECRET, "Mazur", "MARTA", "77010108909")
+    k1 = person_key(SECRET, "77010108909")
+    assert k1 == person_key(SECRET, "77010108909")
     assert re.fullmatch(r"[0-9a-f]{64}", k1)
     assert "77010108909" not in k1
-    assert k1 != person_key("other-secret", "MAZUR", "MARTA", "77010108909")
-    assert k1 != person_key(SECRET, "MAZUR", "MARTA", "61060609015")
-    assert k1 != person_key(SECRET, "NOWAK", "MARTA", "77010108909")
+    assert k1 != person_key("other-secret", "77010108909")
+    assert k1 != person_key(SECRET, "61060609015")
 
 
-def test_person_key_requires_secret():
+def test_person_key_requires_secret_and_valid_pesel():
     with pytest.raises(ValueError):
-        person_key("", "MAZUR", "MARTA", "77010108909")
+        person_key("", "77010108909")
     with pytest.raises(ValueError):
-        person_key(None, "MAZUR", "MARTA", "77010108909")
+        person_key(None, "77010108909")
+    with pytest.raises(ValueError):
+        person_key(SECRET, "77010108900")  # bad checksum
+
+
+def board_doc(source_id, day, op, surname, given, pesel):
+    return {"id": source_id, "dateOfPublication": f"{day}T00:00:00", "textInBody": (
+        f"W dniu {day[8:10]}.{day[5:7]}.{day[:4]} dokonano wpisu do rejestru KRS nr 3"
+        " następującej treści: Dz. 2. Rub. 1. Organ uprawniony do reprezentacji podmiotu"
+        f" PRub. Dane osób wchodzących w skład organu {op}: 1 1. {surname} 2. {given}"
+        f" 3. {pesel} 5. PREZES ZARZĄDU 6. NIE")}
+
+
+def test_same_pesel_with_different_names_is_one_person(db):
+    # Surname change (and a second given name) between entries: still one key, one period.
+    bidder = add_bidder(db, "6791021905", KRS)
+    first = parse_announcement(board_doc(1, "2015-03-02", "wpisać", "KOWALSKA", "ANNA",
+                                         "65050507891"))
+    second = parse_announcement(board_doc(2, "2019-06-10", "wykreślić", "NOWAK-KOWALSKA",
+                                          "ANNA MARIA", "65050507891"))
+    for ann in (first, second):
+        msig.apply_announcement(db, bidder, ann, SECRET)
+    db.commit()
+    rows = db.execute("select person_key, valid_from, valid_to from board_links").fetchall()
+    db.commit()
+    assert [(r["person_key"], r["valid_from"], r["valid_to"]) for r in rows] == [
+        (person_key(SECRET, "65050507891"), date(2015, 3, 2), date(2019, 6, 10))]
 
 
 def test_settings_secret_has_no_default():
     s = load_settings({"DATABASE_URL": "x"})
     assert s.person_hmac_secret is None
     assert s.msig_daily_cap == 500
+    assert s.msig_recheck_days == 180
     s = load_settings({"DATABASE_URL": "x", "PERSON_HMAC_SECRET": "k", "MSIG_DAILY_CAP": "7"})
     assert s.person_hmac_secret == "k" and s.msig_daily_cap == 7
 
@@ -156,21 +172,49 @@ def test_parse_function_change_keeps_member(fixtures):
     assert summary(ann) == [("board", "keep", "ZIELIŃSKI", FAKE["ZIELIŃSKI"])]
 
 
-def test_parse_ignores_shareholders_and_reads_organ_removal(fixtures):
-    # Dz. 1 Rub. 7 (shareholders) is ignored; removing the whole supervisory board removes
-    # every member listed under it.
+def test_parse_shareholder_change_and_organ_removal(fixtures):
+    # A shareholder whose share count changes stays ("dla pozycji"); removing the whole
+    # supervisory board removes every member listed under it.
     ann = parse_announcement(detail(fixtures, 5944222))
     assert ann.entry_date == date(2016, 12, 19)
     assert summary(ann) == [
+        ("shareholder", "keep", "NOWAKOWSKI", FAKE["NOWAKOWSKI"]),
         ("supervisory", "remove", "MAZUR", FAKE["MAZUR"]),
         ("supervisory", "remove", "WOŹNIAK", FAKE["WOŹNIAK"]),
         ("supervisory", "remove", "KRAWCZYK", FAKE["KRAWCZYK"]),
     ]
 
 
+def test_parse_shareholders_added(fixtures):
+    # Company shareholders (no given names, no PESEL) are neither stored nor counted.
+    ann = parse_announcement(detail(fixtures, 7552055))
+    assert ann.entry_date == date(2011, 8, 29) and ann.no_valid_pesel == 0
+    assert summary(ann) == [
+        ("shareholder", "add", "NOWAKOWSKI", FAKE["NOWAKOWSKI"]),
+        ("shareholder", "add", "ZIELIŃSKI", FAKE["ZIELIŃSKI"]),
+    ]
+    ann = parse_announcement(detail(fixtures, 10122246))
+    assert ann.entry_date == date(2022, 7, 1)  # "01.07 .2022"
+    assert summary(ann) == [
+        ("shareholder", "add", "GRABOWSKI", FAKE["GRABOWSKI"]),
+        ("shareholder", "add", "KOWALCZYK", FAKE["KOWALCZYK"]),
+        ("shareholder", "add", "ŁĄCKA", FAKE["ŁĄCKA"]),
+    ]
+
+
+def test_parse_shareholders_removed_and_kept(fixtures):
+    ann = parse_announcement(detail(fixtures, 10841550))
+    assert ann.entry_date == date(2022, 11, 15) and ann.no_valid_pesel == 0
+    assert summary(ann) == [
+        ("shareholder", "remove", "NOWAKOWSKI", FAKE["NOWAKOWSKI"]),
+        ("shareholder", "remove", "ZIELIŃSKI", FAKE["ZIELIŃSKI"]),
+        ("shareholder", "keep", "KOWALCZYK", FAKE["KOWALCZYK"]),
+    ]
+
+
 def test_parse_without_persons(fixtures):
     ann = parse_announcement(detail(fixtures, 18606798))
-    assert ann.persons == [] and ann.invalid_pesel == 0
+    assert ann.persons == [] and ann.no_valid_pesel == 0
     assert ann.entry_date == date(2025, 6, 30)
 
 
@@ -183,16 +227,19 @@ def test_parse_rejects_invalid_pesel_and_ignores_other_sections():
             "PRub. Dane osób wchodzących w skład organu wpisać: "
             "1 1. NOWAK 2. JAN 3. 72031501235 5. PREZES ZARZĄDU "
             "2 1. KOT 2. ADAM 3. 8011200456 5 5. CZŁONEK ZARZĄDU "
+            "3 1. SMITH 2. JOHN 5. CZŁONEK ZARZĄDU 6. NIE "
+            "Dz. 1. Rub. 7. Dane wspólników wpisać: 1 1. ALFA SP. Z O.O. 2. ******** "
+            "3. ********* 5. 100 UDZIAŁÓW "
             "Dz.  5.  Rub.  1.  Kurator wpisać: 1  1.  WILK  2. MAREK 3. 65050507891 "
             "5. POSTANOWIENIE SĄDU"
         ),
     }
     ann = parse_announcement(doc)
     assert ann.entry_date == date(2024, 2, 17)
-    # Bad checksum dropped; a PESEL split by an OCR space is joined; the curator (Dz. 5) is
-    # not a board member.
+    # Bad checksum and missing PESEL are skipped and counted; a PESEL split by an OCR space
+    # is joined; a company shareholder is not a person; the curator (Dz. 5) is not parsed.
     assert summary(ann) == [("board", "add", "KOT", "80112004565")]
-    assert ann.invalid_pesel == 1
+    assert ann.no_valid_pesel == 2
 
 
 def test_parse_falls_back_to_publication_date():
@@ -274,8 +321,8 @@ def test_sync_bidder_stores_links_without_personal_data(db, fixtures):
     assert sync_bidder(db, client(), bidder, SECRET, today=date(2026, 10, 12)) is True
     assert details_route.call_count == len(IDS)
 
-    def key(surname, given):
-        return person_key(SECRET, surname, given, FAKE[surname])
+    def key(surname, given):  # given names document the fixture; the key is PESEL only
+        return person_key(SECRET, FAKE[surname])
 
     rows = {(r["person_key"], r["role"]): r for r in db.execute(
         "select * from board_links where bidder_id = %s", (bidder,))}
@@ -300,6 +347,14 @@ def test_sync_bidder_stores_links_without_personal_data(db, fixtures):
                                                     1990),
         (key("KRAWCZYK", "MARTYNA"), "supervisory"): (date(2016, 12, 15), date(2016, 12, 19),
                                                      1991),
+        # Shareholders: added 2011, share change in 2016 (kept), removed 2022.
+        (key("NOWAKOWSKI", "JAN ADAM"), "shareholder"): (date(2011, 8, 29), date(2022, 11, 15),
+                                                         1972),
+        (key("ZIELIŃSKI", "PIOTR MAREK"), "shareholder"): (date(2011, 8, 29),
+                                                           date(2022, 11, 15), 1980),
+        (key("GRABOWSKI", "KRZYSZTOF"), "shareholder"): (date(2022, 7, 1), None, 1987),
+        (key("KOWALCZYK", "TOMASZ"), "shareholder"): (date(2022, 7, 1), None, 2002),
+        (key("ŁĄCKA", "ANNA MARIA"), "shareholder"): (date(2022, 7, 1), None, 1965),
     }
     got = {k: (r["valid_from"], r["valid_to"], r["birth_year"]) for k, r in rows.items()}
     assert got == expected
@@ -317,7 +372,7 @@ def test_sync_bidder_stores_links_without_personal_data(db, fixtures):
     for surname, pesel in FAKE.items():
         assert pesel not in dump and pesel[:10] not in dump
         assert surname not in dump
-    for given in ("JAN ADAM", "PIOTR MAREK", "ANNA MARIA", "KAROL JÓZEF", "MARTA"):
+    for given in ("JAN ADAM", "PIOTR MAREK", "ANNA MARIA", "KAROL JÓZEF", "MARTA", "KRZYSZTOF"):
         assert given not in dump
 
     # A re-check searches from the newest processed announcement and fetches no details
@@ -407,7 +462,7 @@ def test_handler_syncs_bidder(db, fixtures):
     bidder = add_bidder(db, "6791021905", KRS)
     mock_msig(fixtures)
     HANDLERS["msig_board"](ctx_with(db, SECRET), {"bidder_id": bidder})
-    assert db.execute("select count(*) n from board_links").fetchone()["n"] == 13
+    assert db.execute("select count(*) n from board_links").fetchone()["n"] == 18
     db.commit()
 
 
@@ -443,18 +498,22 @@ def test_enqueue_due(db):
     fresh = add_bidder(db, "7010000005", "0000000003")
     add_bidder(db, "1132853869", None)
     queued = add_bidder(db, "9542583988", "0000000005")
-    db.execute("update bidders set msig_checked_at = now() - interval '40 days' where id = %s",
+    db.execute("update bidders set msig_checked_at = now() - interval '200 days' where id = %s",
                (due_old,))
-    db.execute("update bidders set msig_checked_at = now() - interval '5 days' where id = %s",
+    db.execute("update bidders set msig_checked_at = now() - interval '40 days' where id = %s",
                (fresh,))
     db.commit()
     enqueue(db, "msig_board", f"{queued}@2026-10-11", {"bidder_id": queued})
+    # Default re-check period is 180 days: 40 days ago is still fresh.
+    assert msig.RECHECK_DAYS == 180
     assert enqueue_due(db, date(2026, 10, 12), limit=10) == 2
     keys = {r["key"] for r in db.execute("select key from jobs where kind = 'msig_board'")}
     db.commit()
     assert keys == {f"{due_new}@2026-10-12", f"{due_old}@2026-10-12", f"{queued}@2026-10-11"}
-    # Running it again the same day adds nothing; the limit caps new jobs.
+    # Running it again the same day adds nothing.
     assert enqueue_due(db, date(2026, 10, 12), limit=10) == 0
+    # A shorter period from settings makes the 40-day-old check due.
+    assert enqueue_due(db, date(2026, 10, 12), limit=10, recheck_days=30) == 1
 
 
 def test_enqueue_due_limit(db):

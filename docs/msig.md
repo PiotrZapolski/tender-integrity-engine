@@ -4,6 +4,11 @@ Module `collector/src/tie/identity/msig.py`, job kind `msig_board`, migration
 `008_msig_persons.sql`. This file records how the MSiG API behaves (checked with curl on
 2026-10-12, 1 request per 2 s, our User-Agent) and what the data can and cannot tell.
 
+**Coverage note:** MSiG coverage of KRS entries ends around 2025-11: the KRS act change
+(Dz. U. 2025 poz. 1556, in force 2025-11-29) abolished their announcement in MSiG (details in
+"Completeness" below). Links reflect board, owners and proxies up to about November 2025, so
+the re-check period defaults to 180 days (`MSIG_RECHECK_DAYS`), not 30.
+
 ## Why MSiG
 
 The official KRS API masks names and PESEL of board members. MSiG (Monitor Sądowy i
@@ -72,13 +77,15 @@ Inside `textInBody`, by KRS section:
 | `Dz. 2. Rub. 1.` | Organ uprawniony do reprezentacji (ZARZĄD, or partners of sp.j./sp.k.) | `board` |
 | `Dz. 2. Rub. 2.` | Organ nadzoru (RADA NADZORCZA) | `supervisory` |
 | `Dz. 2. Rub. 3.` | Prokurenci | `proxy` |
+| `Dz. 1. Rub. 7.` | Dane wspólników (shareholders, partners) | `shareholder` |
 
-A bare `Rub. N` keeps the last `Dz.`; `PRub.` is a subsection, not a section. Members are
+A bare `Rub. N` keeps the last `Dz.`; `PRub.` is a subsection, not a section. Persons are
 listed as `<no> 1. NAZWISKO 2. IMIONA 3. PESEL 5. FUNKCJA 6. ...` (before about 2005:
 `4. FUNKCJA 5. ...`, sometimes with the `4.` lost). Operations: `wpisać:` (add),
 `wykreślić:` (remove; also removing the whole organ followed by its members), `zmienić:` or
-`(dla pozycji: 1. X 2. Y 3. PESEL)` followed by field changes (the member stays). Sections we
-ignore although they hold PESEL: `Dz. 1 Rub. 7` (shareholders), `Dz. 5 Rub. 1` (curator).
+`(dla pozycji: 1. X 2. Y 3. PESEL)` followed by field changes (the person stays, e.g. a new
+share count). Shareholders that are companies (no given names, no PESEL) are skipped. A
+section we ignore although it holds PESEL: `Dz. 5 Rub. 1` (curator).
 
 The entry date ("W dniu DD.MM.YYYY dokonano wpisu", falls back to the publication date) is
 the `valid_from` / `valid_to`; the entry number ("rejestru KRS nr N") orders entries of one
@@ -87,18 +94,21 @@ day.
 ## Stored data and privacy
 
 - `board_links(bidder_id, person_key, role, birth_year, valid_from, valid_to, source_id)`.
-- `person_key` = HMAC-SHA256(`PERSON_HMAC_SECRET`, normalized name + "|" + PESEL). The
-  normalized name is surname + first given name as uppercase ASCII letters (no spaces,
-  hyphens or diacritics): the same person appears once as "MARTA MARIA" and once as "MARTA"
-  with the same PESEL, and OCR breaks words. A check constraint allows only 64 hex chars.
-- PESEL is validated (checksum and date) before use; invalid ones are dropped and counted.
+- `person_key` = HMAC-SHA256(`PERSON_HMAC_SECRET`, PESEL). PESEL is unique and stable;
+  names are not (surname changes, "MARTA MARIA" vs "MARTA" for the same PESEL, OCR breaks
+  words), so the name is used only to recognise an entry while parsing and is never stored.
+  The same person in several roles or companies has one key. A check constraint allows only
+  64 hex chars.
+- PESEL is validated (checksum and date) before use. Entries without a valid PESEL (missing,
+  e.g. foreigners, or failing the checks) are skipped and counted in the job log.
 - A removal without an earlier addition (the first entry predates MSiG coverage) becomes a
   one-day period `[entry date, entry date]`.
 - `msig_announcements` lists processed announcement ids per bidder (no personal data), so a
-  re-check (every 30 days, `tie daily`) fetches only new announcements and searches from the
-  newest processed publication date.
+  re-check (every 180 days by default, `MSIG_RECHECK_DAYS`, queued by `tie daily`) fetches
+  only new announcements and searches from the newest processed publication date.
 - `shared_board_pairs(a, b, n_shared, n_concurrent)`: pairs of bidders with `a < b`, persons
-  shared at any time and persons whose periods overlap. No person appears in it. Persons must
+  shared at any time and persons whose periods overlap, in any roles (board, supervisory,
+  proxy, shareholder). No person appears in it. Persons must
   never be exposed in `api.*` views; only this pair-level fact may be.
 - Nothing raw goes into logs, exceptions, `jobs.last_error` or the raw file store.
 

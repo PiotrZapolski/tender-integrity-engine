@@ -84,7 +84,8 @@ def cmd_daily(args: argparse.Namespace) -> int:
         added += enqueue(conn, "identity", t.isoformat())
         added += enqueue(conn, "whitelist", t.isoformat())
         if settings.person_hmac_secret:
-            added += msig.enqueue_due(conn, t, settings.msig_daily_cap)
+            added += msig.enqueue_due(conn, t, settings.msig_daily_cap,
+                                       settings.msig_recheck_days)
         else:
             log.warning("daily: PERSON_HMAC_SECRET not set, msig_board jobs not queued")
     log.info("daily %s: %d new jobs", t, added)

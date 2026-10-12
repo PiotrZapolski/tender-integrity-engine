@@ -22,6 +22,7 @@ class Settings:
     # refuse to run and `tie daily` does not queue them while it is unset.
     person_hmac_secret: str | None = None
     msig_daily_cap: int = 500
+    msig_recheck_days: int = 180
 
 
 def load_settings(env: Mapping[str, str] | None = None) -> Settings:
@@ -37,4 +38,5 @@ def load_settings(env: Mapping[str, str] | None = None) -> Settings:
         wl_daily_cap=int(e.get("WL_DAILY_CAP", "90")),
         person_hmac_secret=e.get("PERSON_HMAC_SECRET") or None,
         msig_daily_cap=int(e.get("MSIG_DAILY_CAP", "500")),
+        msig_recheck_days=int(e.get("MSIG_RECHECK_DAYS", "180")),
     )

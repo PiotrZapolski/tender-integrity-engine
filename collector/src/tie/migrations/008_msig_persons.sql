@@ -1,8 +1,8 @@
--- Board, supervisory board and proxy members of bidders, parsed from MSiG announcements of
--- KRS entries (tie.identity.msig). Privacy: no name or PESEL of a person is ever stored.
--- A person is only `person_key` = HMAC-SHA256(PERSON_HMAC_SECRET, normalized name | PESEL),
--- plus the birth year. Persons must never be exposed in public (api.*) views; only the fact
--- that two bidders share a member (shared_board_pairs) may be published.
+-- Board, supervisory board, proxy and shareholder links of bidders, parsed from MSiG
+-- announcements of KRS entries (tie.identity.msig). Privacy: no name or PESEL of a person is
+-- ever stored. A person is only `person_key` = HMAC-SHA256(PERSON_HMAC_SECRET, PESEL), plus
+-- the birth year. Persons must never be exposed in public (api.*) views; only the fact that
+-- two bidders share a person (shared_board_pairs) may be published.
 
 alter table bidders add column msig_checked_at timestamptz;
 
@@ -10,7 +10,7 @@ create table board_links (
   bidder_id bigint not null references bidders(id) on delete cascade,
   -- Hex HMAC digest only: the check rejects anything that could be a raw name or PESEL.
   person_key text not null check (person_key ~ '^[0-9a-f]{64}$'),
-  role text not null check (role in ('board', 'supervisory', 'proxy')),
+  role text not null check (role in ('board', 'supervisory', 'proxy', 'shareholder')),
   birth_year int,
   valid_from date not null,
   -- Null while the person is still listed (as far as MSiG shows, see docs/msig.md).
@@ -33,7 +33,8 @@ create table msig_announcements (
   primary key (bidder_id, source_id)
 );
 
--- Pairs of bidders (a < b) sharing at least one board, supervisory board or proxy member.
+-- Pairs of bidders (a < b) sharing at least one person (board, supervisory board, proxy or
+-- shareholder, in any combination of roles).
 -- n_shared counts shared persons at any time, n_concurrent those whose periods overlap.
 create view shared_board_pairs as
 select x.bidder_id as a,

@@ -5,17 +5,20 @@ SĄDOWEGO") quote the entry text with names and PESEL of board members, which th
 KRS API masks. For each bidder with a KRS number we list its announcements, fetch the text of
 the new ones and parse the sections:
 
+- Dz. 1 Rub. 7 (wspólnicy) -> role `shareholder`,
 - Dz. 2 Rub. 1 (organ uprawniony do reprezentacji) -> role `board`,
 - Dz. 2 Rub. 2 (organ nadzoru) -> role `supervisory`,
 - Dz. 2 Rub. 3 (prokurenci) -> role `proxy`,
 
 with the operations `wpisać` (add), `wykreślić` (remove) and `zmienić` or a
-"(dla pozycji: ...)" reference (the member stays, one of their fields changes).
+"(dla pozycji: ...)" reference (the member stays, one of their fields changes). Entries
+without a valid PESEL (missing, bad checksum or date) are skipped and counted.
 
 Privacy (binding): names and PESEL live only in memory while an announcement is parsed.
 Nothing raw is stored, logged or put into an exception message. A person is stored as
-`person_key` = HMAC-SHA256(PERSON_HMAC_SECRET, normalized name + "|" + PESEL) with the birth
-year and the role. Research notes, formats and the completeness caveat: docs/msig.md.
+`person_key` = HMAC-SHA256(PERSON_HMAC_SECRET, PESEL) with the birth year and the role; the
+name is used only to recognise an entry while parsing. Research notes, formats and the
+completeness caveat: docs/msig.md.
 """
 
 from __future__ import annotations
@@ -25,7 +28,6 @@ import hmac
 import logging
 import re
 import time
-import unicodedata
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime
 
@@ -46,10 +48,12 @@ MAX_PAGES = 400
 HISTORY_START = date(2001, 1, 1)
 # One msig_board job works at most this long, then queues a continuation for the same bidder.
 MSIG_TIME_LIMIT_S = 900
-RECHECK_DAYS = 30
+# MSiG stopped carrying KRS entries on 2025-11-29 (docs/msig.md): re-checks rarely find
+# anything new, so they are rare.
+RECHECK_DAYS = 180
 JOB_KIND = "msig_board"
 
-ROLES = {(2, 1): "board", (2, 2): "supervisory", (2, 3): "proxy"}
+ROLES = {(1, 7): "shareholder", (2, 1): "board", (2, 2): "supervisory", (2, 3): "proxy"}
 
 _LETTERS = "A-Za-zĄĆĘŁŃÓŚŹŻąćęłńóśźż"
 _SECTION_RE = re.compile(
@@ -60,6 +64,9 @@ _OPS = {"wpisać": "add", "wykreślić": "remove", "zmienić": "keep"}
 # match inside one entry; the PESEL may be split by an OCR space.
 _PERSON_RE = re.compile(
     r"(?<![\d.])1\.\s*([^\d()]+?)\s+2\.\s*([^\d()]+?)\s+3\.\s*((?:\d\s?){10}\d)(?!\d)")
+# The same entry shape with no PESEL after "3." (or no field 3 at all): counted, not stored.
+_NO_PESEL_RE = re.compile(
+    r"(?<![\d.])1\.\s*([^\d()]+?)\s+2\.\s*([^\d()]+?)\s+(?:3\.\s*(?=[^\d\s])|[4-6]\.)")
 _FOR_POSITION_RE = re.compile(r"dla\s+pozycji\s*:?\s*$")
 _ENTRY_DATE_RE = re.compile(r"W\s*dniu\s*([\d\s.]{8,16}?)\s*dokonano")
 _ENTRY_NO_RE = re.compile(r"rejestru\s+KRS\s+nr\s*(\d+)")
@@ -89,7 +96,8 @@ class Announcement:
     entry_date: date
     entry_no: int | None
     persons: list[PersonEntry]
-    invalid_pesel: int = 0
+    # Person entries in a parsed section skipped for lack of a valid PESEL.
+    no_valid_pesel: int = 0
 
 
 # --- PESEL, names, keys ---------------------------------------------------------------
@@ -123,28 +131,13 @@ def birth_year(pesel: str) -> int:
     return born.year
 
 
-def _letters(text: str) -> str:
-    text = text.upper().replace("Ł", "L")
-    text = unicodedata.normalize("NFKD", text)
-    return re.sub(r"[^A-Z]", "", text)
-
-
-def normalize_full_name(surname: str, given: str) -> str:
-    """Surname and first given name as uppercase ASCII letters only.
-
-    Spaces, hyphens and diacritics are dropped (MSiG text has OCR spaces inside words), and
-    only the first given name counts: the same person (same PESEL) appears in MSiG both with
-    and without a second given name.
-    """
-    first = (given.split() or [""])[0]
-    return f"{_letters(surname)} {_letters(first)}"
-
-
-def person_key(secret: str | None, surname: str, given: str, pesel: str) -> str:
+def person_key(secret: str | None, pesel: str) -> str:
+    """HMAC of the PESEL alone: unique and stable, unlike names (surname changes, OCR)."""
     if not secret:
         raise ValueError("PERSON_HMAC_SECRET is required to compute person keys")
-    message = f"{normalize_full_name(surname, given)}|{pesel}".encode()
-    return hmac.new(secret.encode(), message, hashlib.sha256).hexdigest()
+    if not valid_pesel(pesel):
+        raise ValueError("invalid PESEL")
+    return hmac.new(secret.encode(), pesel.encode(), hashlib.sha256).hexdigest()
 
 
 # --- parser ---------------------------------------------------------------------------
@@ -179,34 +172,53 @@ def _sections(body: str) -> list[tuple[int, int | None, int]]:
     return out
 
 
+def _section_at(sections: list[tuple[int, int | None, int]],
+                pos: int) -> tuple[int, str] | None:
+    """(section start, role) of the parsed section containing `pos`, else None."""
+    current = None
+    for start, dz, rub in sections:
+        if start > pos:
+            break
+        current = (start, dz, rub)
+    if current is None or (current[1], current[2]) not in ROLES:
+        return None
+    return current[0], ROLES[(current[1], current[2])]
+
+
+def _is_person_name(surname: str, given: str) -> bool:
+    # Uppercase only (lowercase means prose such as addresses), and the given names must have
+    # letters (a company shareholder has "2. ********" or similar).
+    return (bool(surname) and bool(re.search(r"[A-ZĄĆĘŁŃÓŚŹŻ]", given))
+            and not re.search(r"[a-ząćęłńóśźż]", surname + given))
+
+
 def _persons(body: str) -> tuple[list[PersonEntry], int]:
     sections = _sections(body)
     persons: list[PersonEntry] = []
-    invalid = 0
+    skipped = 0
+    for m in _NO_PESEL_RE.finditer(body):
+        if (_section_at(sections, m.start()) is not None
+                and _is_person_name(_clean_name(m.group(1)), _clean_name(m.group(2)))):
+            skipped += 1
     for m in _PERSON_RE.finditer(body):
-        current = None
-        for start, dz, rub in sections:
-            if start > m.start():
-                break
-            current = (start, dz, rub)
-        if current is None or (current[1], current[2]) not in ROLES:
+        found = _section_at(sections, m.start())
+        if found is None:
             continue
-        section_start = current[0]
-        role = ROLES[(current[1], current[2])]
+        section_start, role = found
+        surname, given = _clean_name(m.group(1)), _clean_name(m.group(2))
+        if not _is_person_name(surname, given):
+            continue
+        pesel = re.sub(r"\s", "", m.group(3))
+        if not valid_pesel(pesel):
+            skipped += 1
+            continue
         prefix = body[section_start:m.start()]
         ops = list(_OP_RE.finditer(prefix))
         op = _OPS[ops[-1].group(1)] if ops else "add"
         if _FOR_POSITION_RE.search(prefix.rstrip(" (")):
             op = "keep"
-        surname, given = _clean_name(m.group(1)), _clean_name(m.group(2))
-        pesel = re.sub(r"\s", "", m.group(3))
-        if not surname or not given or re.search(r"[a-ząćęłńóśźż]", surname + given):
-            continue
-        if not valid_pesel(pesel):
-            invalid += 1
-            continue
         persons.append(PersonEntry(role, op, surname, given, pesel))
-    return persons, invalid
+    return persons, skipped
 
 
 def parse_announcement(doc: dict) -> Announcement:
@@ -214,14 +226,14 @@ def parse_announcement(doc: dict) -> Announcement:
     body = _normalize_text(doc.get("textInBody") or "")
     published = date.fromisoformat(str(doc["dateOfPublication"])[:10])
     entry_no = _ENTRY_NO_RE.search(body)
-    persons, invalid = _persons(body)
+    persons, skipped = _persons(body)
     return Announcement(
         source_id=str(doc["id"]),
         published=published,
         entry_date=_entry_date(body) or published,
         entry_no=int(entry_no.group(1)) if entry_no else None,
         persons=persons,
-        invalid_pesel=invalid,
+        no_valid_pesel=skipped,
     )
 
 
@@ -286,7 +298,7 @@ def apply_announcement(conn: psycopg.Connection, bidder_id: int, ann: Announceme
     """Apply the events of one announcement (in the caller's transaction)."""
     day = ann.entry_date
     for p in ann.persons:
-        key = person_key(secret, p.surname, p.given, p.pesel)
+        key = person_key(secret, p.pesel)
         open_row = conn.execute(
             "select valid_from from board_links where bidder_id = %s and person_key = %s"
             " and role = %s and valid_to is null order by valid_from desc limit 1",
@@ -344,7 +356,7 @@ def sync_bidder(conn: psycopg.Connection, client: PoliteClient, bidder_id: int,
     conn.commit()
     done = {r["source_id"] for r in done_rows}
     since = max((r["published"] for r in done_rows), default=HISTORY_START)
-    processed = persons = invalid = 0
+    processed = persons = skipped = 0
     for items in _pages(client, krs, since, today):
         todo = [str(it["id"]) for it in items if str(it["id"]) not in done]
         anns = [parse_announcement(fetch_details(client, sid)) for sid in todo]
@@ -353,7 +365,7 @@ def sync_bidder(conn: psycopg.Connection, client: PoliteClient, bidder_id: int,
             for ann in anns:
                 apply_announcement(conn, bidder_id, ann, secret)
                 persons += len(ann.persons)
-                invalid += ann.invalid_pesel
+                skipped += ann.no_valid_pesel
             conn.commit()
         except Exception:
             conn.rollback()
@@ -365,8 +377,8 @@ def sync_bidder(conn: psycopg.Connection, client: PoliteClient, bidder_id: int,
                      bidder_id, processed)
             return False
     _mark_checked(conn, bidder_id)
-    log.info("msig: bidder %s: %d new announcements, %d person entries, %d invalid PESEL",
-             bidder_id, processed, persons, invalid)
+    log.info("msig: bidder %s: %d new announcements, %d person entries,"
+             " %d entries skipped without a valid PESEL", bidder_id, processed, persons, skipped)
     return True
 
 
@@ -384,13 +396,14 @@ def run_job(conn: psycopg.Connection, client: PoliteClient, secret: str | None,
         log.info("msig: continuation %s queued", key)
 
 
-def enqueue_due(conn: psycopg.Connection, today: date, limit: int) -> int:
-    """Queue msig_board jobs for bidders with a KRS not checked in RECHECK_DAYS days."""
+def enqueue_due(conn: psycopg.Connection, today: date, limit: int,
+                recheck_days: int = RECHECK_DAYS) -> int:
+    """Queue msig_board jobs for bidders with a KRS not checked in `recheck_days` days."""
     rows = conn.execute(
         "select b.id from bidders b"
         " where b.krs is not null"
         " and (b.msig_checked_at is null"
-        f"      or b.msig_checked_at < now() - interval '{RECHECK_DAYS} days')"
+        f"      or b.msig_checked_at < now() - interval '{int(recheck_days)} days')"
         " and not exists (select 1 from jobs j where j.kind = %s"
         "   and j.status in ('queued', 'running') and j.payload->>'bidder_id' = b.id::text)"
         " order by b.msig_checked_at nulls first,"
