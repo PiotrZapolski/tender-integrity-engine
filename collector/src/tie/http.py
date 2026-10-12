@@ -24,12 +24,19 @@ class PoliteClient:
     `rates` maps a host to the minimal gap in seconds between two requests to it.
     Retries on RETRY_STATUSES and httpx.TransportError; other responses (including
     4xx other than 429) are returned as is. After `max_retries` retries raises HttpGiveUp.
+    `retry_statuses_by_host` adds statuses retried only for a given host (for example 403
+    from a WAF that throttles under load).
     """
 
     def __init__(self, user_agent: str, rates: dict[str, float], *, max_retries: int = 5,
                  base_delay: float = 1.0, sleep=time.sleep, timeout: float = 60.0,
-                 clock=time.monotonic, max_retry_after: float = 300.0):
+                 clock=time.monotonic, max_retry_after: float = 300.0,
+                 retry_statuses_by_host: dict[str, set[int]] | None = None):
         self.rates = dict(rates)
+        self.retry_statuses_by_host = {
+            host: frozenset(statuses)
+            for host, statuses in (retry_statuses_by_host or {}).items()
+        }
         self.max_retry_after = max_retry_after
         self.max_retries = max_retries
         self.base_delay = base_delay
@@ -49,6 +56,7 @@ class PoliteClient:
 
     def request(self, method: str, url: str, **kw) -> httpx.Response:
         host = urlparse(url).hostname or ""
+        retryable = RETRY_STATUSES | self.retry_statuses_by_host.get(host, frozenset())
         status = None
         for attempt in range(self.max_retries + 1):
             self._wait_turn(host)
@@ -56,7 +64,7 @@ class PoliteClient:
                 r = self.client.request(method, url, **kw)
             except httpx.TransportError:
                 r = None
-            if r is not None and r.status_code not in RETRY_STATUSES:
+            if r is not None and r.status_code not in retryable:
                 return r
             status = None if r is None else r.status_code
             if attempt == self.max_retries:

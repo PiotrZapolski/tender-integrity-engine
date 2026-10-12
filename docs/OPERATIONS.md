@@ -79,6 +79,18 @@ from documents where status = 'mismatch' and doc_type = 'opening'
 on conflict (kind, key) do nothing;
 ```
 
+Run it only after the fix is deployed (the worker picks the jobs up at once). The key of
+the original job is the bare `source_doc_id`, and keys are unique per kind whatever the job
+status, so the `@reparse-<timestamp>` suffix is required; running the statement again a
+minute later queues another round. To re-parse only the documents rejected on prices (for
+example after the rejected-offers rule, where BZP min/max cover only non-rejected offers),
+add `and error like '%prices%'`. Watch the outcome:
+
+```sql
+select status, count(*) from documents where doc_type = 'opening' group by 1 order by 2 desc;
+select count(*) filter (where outside_bzp_range) outside, count(*) bids from bids;
+```
+
 The same works for `needs_review` documents. Bids that fail during identity matching are
 logged (`identity: bid <id> skipped`) and retried by the next `identity` job; they never
 block the other bids. Each failed run increments `bids.identity_failures`; after 3 failed

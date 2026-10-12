@@ -301,3 +301,36 @@ def test_second_opening_document_replaces_bids_of_lot(db, fixtures, tmp_path):
     assert sum(b["is_winner"] for b in bids) == 1
     assert all(b["document_id"] == doc_b for b in bids)
     assert {b["bidder_name_raw"] for b in bids} == {o["bidder_name"] for o in offers_b}
+    assert all(b["outside_bzp_range"] is False for b in bids)
+
+
+def test_rejected_offers_stored_and_flagged(db, fixtures, tmp_path):
+    # Real lot: BZP min/max (89999.10 / 184500.00) cover only the 3 non-rejected offers.
+    rec = json.loads((fixtures / "bzp" / "result_kolbudy.json").read_text("utf-8"))
+    upsert_notice(db, parse_result_notice(rec), "sha")
+    winner = upsert_bidder(db, name="Zwyciezca Sp. z o.o.", nip="7532450747", city=None,
+                           province=None)
+    db.execute("update lots set n_offers = 5, n_rejected = 2, price_min = 89999.10,"
+               " price_max = 184500.00, price_winner = 89999.10, winner_bidder_id = %s",
+               (winner,))
+    db.commit()
+    rs = RawStore(tmp_path)
+    data = docx_bytes([
+        "INFORMACJA Z OTWARCIA OFERT",
+        "1. Alfa Sp. z o.o., NIP 527-268-01-41, cena 633 627,10 zl",
+        "2. Beta Sp. z o.o., NIP 753-245-07-47, cena 89 999,10 zl",
+        "3. Gamma Sp. z o.o., NIP 747-192-74-38, cena 184 500,00 zl",
+        "4. Delta Sp. z o.o., NIP 898-225-25-80, cena 68 809,78 zl",
+        "5. Epsilon Sp. z o.o., NIP 118-228-67-40, cena 120 552,30 zl",
+    ])
+    doc_id = insert_doc(db, rs, data, "otwarcie.docx", KOL_OCDS)
+    fake = FakeProvider({"budget": None, "offers": []})
+    assert process_opening_document(db, rs, fake, doc_id) == "parsed", doc_row(db, doc_id)
+    assert fake.calls == 0
+    bids = db.execute("select * from bids order by offer_no").fetchall()
+    assert [b["price"] for b in bids] == [D("633627.10"), D("89999.10"), D("184500.00"),
+                                          D("68809.78"), D("120552.30")]
+    assert [b["outside_bzp_range"] for b in bids] == [True, False, False, True, False]
+    assert [b["is_winner"] for b in bids] == [False, True, False, False, False]
+    assert bids[1]["bidder_id"] == winner
+    assert all(b["price_scale"] == D(1) for b in bids)

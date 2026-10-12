@@ -3,6 +3,11 @@
 Nothing from an opening document enters the analysis unless it passes this check: the offer
 count, the min/max price (with detection of unit prices, where BZP holds totals) and the winner
 (by NIP, or by name similarity when the document has no NIPs) must agree with BZP.
+
+BZP computes the lowest and highest price (fields 6.2/6.3) over the non-rejected offers only,
+while the opening document lists every offer. When BZP reports rejected offers and the min/max
+of all offers do not match, the check accepts a scale under which the BZP min and max are both
+offer prices and at most `n_rejected` offers lie outside the BZP range (`outside_range`).
 """
 
 from __future__ import annotations
@@ -33,6 +38,7 @@ class LotFacts:
     price_winner: Decimal | None
     winner_nip: str | None
     winner_name_norm: str | None
+    n_rejected: int | None = None
 
 
 @dataclass(frozen=True)
@@ -40,6 +46,10 @@ class CheckResult:
     ok: bool
     scale: Decimal  # multiplier: BZP price = document price * scale
     reasons: list[str] = field(default_factory=list)  # empty when ok
+    # Per offer, when the rejected-offers rule accepted the prices: True for offers whose
+    # scaled price lies outside the BZP min/max range (likely the rejected ones). None when
+    # the exact rule was used.
+    outside_range: list[bool] | None = None
 
 
 def _nip_digits(nip: str | None) -> str | None:
@@ -72,6 +82,41 @@ def _detect_scale(prices: list[Decimal], facts: LotFacts) -> Decimal | None:
     if abs(k1 - k2) / k1 > SCALE_TOLERANCE:
         return None
     return ((k1 + k2) / 2).quantize(SCALE_QUANTUM, rounding=ROUND_HALF_UP)
+
+
+def _outside(scaled: Decimal, facts: LotFacts) -> bool:
+    return (scaled < facts.price_min - PRICE_TOLERANCE
+            or scaled > facts.price_max + PRICE_TOLERANCE)
+
+
+def _detect_scale_with_rejected(prices: list[Decimal], facts: LotFacts
+                                ) -> tuple[Decimal, list[bool]] | None:
+    """Rejected-offers rule: (scale, outside flags per offer), or None.
+
+    Candidate scales: 1 first, then price_min / p for each offer price p. A scale is accepted
+    when the BZP min and max both equal a scaled offer price (within PRICE_TOLERANCE) and at
+    most `n_rejected` scaled offer prices lie outside [price_min, price_max].
+    """
+    if not facts.n_rejected or facts.n_rejected <= 0:
+        return None
+    candidates = [Decimal(1)]
+    if facts.price_min > 0:
+        candidates.extend(facts.price_min / p for p in prices if p > 0)
+    seen: set[Decimal] = set()
+    for k in candidates:
+        if k in seen:
+            continue
+        seen.add(k)
+        scaled = [p * k for p in prices]
+        if not any(abs(s - facts.price_min) <= PRICE_TOLERANCE for s in scaled):
+            continue
+        if not any(abs(s - facts.price_max) <= PRICE_TOLERANCE for s in scaled):
+            continue
+        outside = [_outside(s, facts) for s in scaled]
+        if sum(outside) <= facts.n_rejected:
+            scale = k if k == 1 else k.quantize(SCALE_QUANTUM, rounding=ROUND_HALF_UP)
+            return scale, outside
+    return None
 
 
 def _price_matches(price: Decimal | None, scale: Decimal | None, facts: LotFacts) -> bool:
@@ -113,6 +158,7 @@ def cross_check(offers: list[OfferRow], facts: LotFacts) -> CheckResult:
         reasons.append("count")
 
     scale: Decimal | None = None
+    outside_range: list[bool] | None = None
     if bzp_prices:
         prices = [o.price for o in offers]
         if not prices or any(p is None for p in prices):
@@ -120,10 +166,14 @@ def cross_check(offers: list[OfferRow], facts: LotFacts) -> CheckResult:
         else:
             scale = _detect_scale(prices, facts)
             if scale is None:
+                found = _detect_scale_with_rejected(prices, facts)
+                if found is not None:
+                    scale, outside_range = found
+            if scale is None:
                 reasons.append("prices")
 
     if not _winner_ok(offers, facts, scale):
         reasons.append("winner")
 
     return CheckResult(ok=not reasons, scale=scale if scale is not None else Decimal(1),
-                       reasons=reasons)
+                       reasons=reasons, outside_range=outside_range)

@@ -34,6 +34,17 @@ def test_migration_002_applied(db):
     assert col["column_default"] == "0"
 
 
+def test_migration_003_applied(db):
+    assert resources.files("tie.migrations").joinpath("003_bids_outside_range.sql").is_file()
+    names = {r["name"] for r in db.execute("select name from schema_migrations").fetchall()}
+    assert "003_bids_outside_range.sql" in names
+    col = db.execute(
+        "select data_type, column_default, is_nullable from information_schema.columns"
+        " where table_name = 'bids' and column_name = 'outside_bzp_range'").fetchone()
+    assert col["data_type"] == "boolean" and col["is_nullable"] == "YES"
+    assert col["column_default"] is None
+
+
 def test_pg_trgm_enabled(db):
     row = db.execute("select extname from pg_extension where extname='pg_trgm'").fetchone()
     assert row is not None

@@ -95,3 +95,37 @@ def test_retry_after_capped_by_default():
     assert r.text == "ok"
     assert 300.0 in sleeps
     assert 86400 not in sleeps
+
+
+def waf_client(sleeps):
+    return PoliteClient("ua", {}, base_delay=1.0, sleep=sleeps.append,
+                        retry_statuses_by_host={"ezamowienia.gov.pl": {403}})
+
+
+@respx.mock
+def test_403_retried_on_configured_host():
+    sleeps = []
+    route = respx.get("https://ezamowienia.gov.pl/x").mock(side_effect=[
+        httpx.Response(403),
+        httpx.Response(200, text="ok"),
+    ])
+    r = waf_client(sleeps).get("https://ezamowienia.gov.pl/x")
+    assert r.status_code == 200 and r.text == "ok"
+    assert route.call_count == 2
+    assert sleeps == [1.0]
+
+
+@respx.mock
+def test_403_on_other_host_returned_without_retry():
+    sleeps = []
+    route = respx.get("https://example.com/forbidden").mock(return_value=httpx.Response(403))
+    r = waf_client(sleeps).get("https://example.com/forbidden")
+    assert r.status_code == 403 and route.call_count == 1
+    assert sleeps == []
+
+
+def test_handlers_configure_ezamowienia_waf_retry():
+    from tie.handlers import RATES, RETRY_STATUSES_BY_HOST
+
+    assert RATES["ezamowienia.gov.pl"] == 2.0
+    assert RETRY_STATUSES_BY_HOST == {"ezamowienia.gov.pl": {403}}
