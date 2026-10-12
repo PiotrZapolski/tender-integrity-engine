@@ -58,7 +58,7 @@ def list_documents(client: PoliteClient, ocds_id: str) -> list[dict]:
     r.raise_for_status()
     data = r.json() or []
     if not isinstance(data, list):
-        raise ValueError(f"unexpected documents payload for {ocds_id}: {type(data).__name__}")
+        raise TypeError(f"unexpected documents payload for {ocds_id}: {type(data).__name__}")
     out = []
     for d in data:
         if not isinstance(d, dict) or not d.get("objectId"):
