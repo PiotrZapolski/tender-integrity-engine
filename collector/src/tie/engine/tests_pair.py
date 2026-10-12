@@ -360,3 +360,12 @@ def _percentiles(results: list[_Result], test_id: str, *, higher_is_signal: bool
                 r.percentile = bisect_right(values, r.value) / n
             else:
                 r.percentile = (n - bisect_left(values, r.value)) / n
+
+
+# Pure pair screens shared with `tie.validation` (gold cases and background pairs in memory):
+# `rotation_index(row)` takes a mapping with `n_together`, `a_wins`, `b_wins`;
+# `price_ratio_cv(priced, a, b)` takes a `PricedBids` filled per bidder and lot.
+PricedBids = _Market
+PricedBid = _Bid
+rotation_index = _rotation
+price_ratio_cv = _ratio_cv

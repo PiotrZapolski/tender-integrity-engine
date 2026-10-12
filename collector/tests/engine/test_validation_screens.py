@@ -39,7 +39,7 @@ def test_percentile_counts_ties_against_the_gold_value():
 
 
 def test_lot_screens_reuse_engine_arithmetic():
-    prices = [Decimal("100000"), Decimal("130000"), Decimal("130500"), Decimal("131000")]
+    prices = [Decimal(100000), Decimal(130000), Decimal(130500), Decimal(131000)]
     out = lot_screens(_tender(1, prices, [1, 2, 3, 4]))
     assert out["3.3.7"] == relative_distance(prices)[0] == pytest.approx(60.0)
     assert out["3.3.5"] == identical_prices(prices)[0] == 0.0
