@@ -232,7 +232,7 @@ def _month_label(date_text: Any) -> str:
 
 
 def _no_dashes(text: str) -> str:
-    return text.replace(" - ", "-").replace("-", "-")
+    return text.replace(chr(0x2014), "-").replace(chr(0x2013), "-")
 
 
 def _id(value: Any) -> str | None:
@@ -643,7 +643,7 @@ def template_explanation(evidence: Evidence, decision: DecisionLike | None) -> E
 # --- number guard ------------------------------------------------------------------------
 
 _NUMBER = re.compile(r"\d+(?:[.,]\d+)?")
-_THOUSANDS = re.compile(r"(?<=\d)[   ](?=\d{3}(?!\d))")
+_THOUSANDS = re.compile(r"(?<=\d)[ \u00a0\u202f](?=\d{3}(?!\d))")
 # Scalars under these keys are identifiers, not facts: their digits never allow a number.
 _ID_KEYS = ("id", "nip", "regon", "krs", "hash", "url", "winner", "a", "b", "bidders",
             "members", "key")
