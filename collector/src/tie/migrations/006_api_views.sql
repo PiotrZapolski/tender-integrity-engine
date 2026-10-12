@@ -8,7 +8,9 @@
 -- and their names are also replaced inside generated texts (titles, summaries, findings,
 -- alternatives). Raw `signals.evidence` and `test_results` are never exposed.
 --
--- Only `published` signals are visible (api.signals, api.signal_detail and every `signal_ids`).
+-- Only public signals are visible (api.signals, api.signal_detail, every `signal_ids` and
+-- stats.signals_published): status `published` and `run_id` of the latest engine run with
+-- status `done`.
 --
 -- The role is created without login. Operator, once per database (see docs/OPERATIONS.md):
 --   alter role tie_reader with login password '<strong password>';
@@ -188,10 +190,14 @@ select
 from bidders b;
 
 -- Signal with its cluster (the cluster row of the signal's run, else the latest one).
+-- `is_public`: published and confirmed by the latest finished engine run; signals of clusters
+-- that disappeared keep their row but drop out of the API.
 create or replace view v_signal_cluster as
 select
   s.signal_id,
   s.status,
+  (s.status = 'published' and s.run_id is not distinct from (
+    select max(r.run_id) from engine_runs r where r.status = 'done')) as is_public,
   s.probability,
   s.strength,
   s.oecd,
@@ -316,7 +322,7 @@ select
     union
     select l.winner_bidder_id from lots l where l.winner_bidder_id is not null) x)::int
     as bidders,
-  (select count(*) from signals where status = 'published')::int as signals_published,
+  (select count(*) from v_signal_cluster where is_public)::int as signals_published,
   (select round(
      count(*) filter (where status = 'parsed')::numeric
      / nullif(count(*) filter (where status in ('parsed', 'mismatch', 'needs_review')), 0),
@@ -437,7 +443,7 @@ cross join lateral (
       ) fi
     ), '{}'::text[]) as from_findings
 ) oi
-where sc.status = 'published'
+where sc.is_public
 order by sc.probability desc nulls last, sc.strength desc nulls last, sc.signal_id;
 
 -- api.signal_detail (one row per published signal)
@@ -504,7 +510,7 @@ cross join lateral (
       '[]'::jsonb)
   ) as graph
 ) g
-where sc.status = 'published';
+where sc.is_public;
 
 -- api.bidders (one row per bidder with at least one bid)
 create or replace view api.bidders as
@@ -557,7 +563,7 @@ cross join lateral (
 cross join lateral (
   select coalesce(array_agg(sc.signal_id order by sc.signal_id), '{}'::text[]) as signal_ids
   from v_signal_cluster sc
-  where sc.status = 'published' and ab.bidder_id = any(sc.members)
+  where sc.is_public and ab.bidder_id = any(sc.members)
 ) sg;
 
 -- api.buyers (one row per contracting authority)
@@ -587,7 +593,7 @@ cross join lateral (
   from procedures p
   join lots l on l.procedure_id = p.ocds_id
   join lot_market lm on lm.lot_id = l.id
-  join v_signal_cluster sc on sc.market_id = lm.market_id and sc.status = 'published'
+  join v_signal_cluster sc on sc.market_id = lm.market_id and sc.is_public
   where p.buyer_id = b.id
     and (
       select count(distinct bb.bidder_id)
