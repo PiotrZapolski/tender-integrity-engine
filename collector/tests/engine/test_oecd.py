@@ -29,7 +29,8 @@ def test_catalog_sections_and_fields():
     for c in CATALOG:
         assert c.item.startswith(c.section + ".")
         assert c.title and c.how
-        assert " - " not in c.title + c.how and "-" not in c.title + c.how
+        text = c.title + c.how
+        assert chr(0x2014) not in text and chr(0x2013) not in text
 
 
 def test_catalog_known_rows():
