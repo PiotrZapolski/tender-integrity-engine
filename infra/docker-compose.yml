@@ -36,7 +36,7 @@ services:
     build: ../collector
     image: tie-collector
     env_file: .env
-    command: ["supercronic", "/app/crontab"]
+    command: ["/usr/local/bin/supercronic", "/app/crontab"]
     depends_on: { migrate: { condition: service_completed_successfully } }
     restart: unless-stopped
     stop_grace_period: 120s
