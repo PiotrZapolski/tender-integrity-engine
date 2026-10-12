@@ -279,14 +279,14 @@ def markdown_summary(report: dict) -> str:
     lines = [
         "# Walidacja silnika TIE",
         "",
-        f"Przebieg kalibracji {_num(report.get('calibration_run_id'))}, {report['run_at']},"
-        f" dane do {p['as_of']}.",
+        (f"Przebieg kalibracji {_num(report.get('calibration_run_id'))}, {report['run_at']},"
+        f" dane do {p['as_of']}."),
         "",
         "## Bramka",
         "",
-        f"- Test A: {gate['test_a']} (udział w top 5%: {_pct(gate['test_a_share'])},"
+        (f"- Test A: {gate['test_a']} (udział w top 5%: {_pct(gate['test_a_share'])},"
         f" ocenione jednostki: {gate['test_a_evaluable']}, próg {_pct(TEST_A_MIN_SHARE)},"
-        f" minimum {TEST_A_MIN_EVALUABLE})",
+        f" minimum {TEST_A_MIN_EVALUABLE})"),
         f"- Test C: {gate['test_c']}",
         "- Gotowe do przeglądu przez człowieka: "
         + ("tak" if gate["ready_for_human_review"] else "nie"),
@@ -315,12 +315,12 @@ def markdown_summary(report: dict) -> str:
         "## Test B: pełny silnik na naszych danych",
         "",
         f"- Przebiegi silnika: {b['engine_runs']}",
-        f"- Sprawy pozytywne (UOKiK + KIO utrzymane): {pos['n']}, ocenione {pos['evaluable']},"
+        (f"- Sprawy pozytywne (UOKiK + KIO utrzymane): {pos['n']}, ocenione {pos['evaluable']},"
         f" w jednym klastrze {pos['in_cluster']} (recall {_pct(pos['recall'])}),"
         f" z prawdopodobieństwem od progu przeglądu {pos['flagged']},"
-        f" z wyprzedzeniem {pos['lead_hits']}",
-        f"- KIO uchylone (negatywne): ocenione {b['kio_overturned']['evaluable']},"
-        f" w jednym klastrze {b['kio_overturned']['in_cluster']}",
+        f" z wyprzedzeniem {pos['lead_hits']}"),
+        (f"- KIO uchylone (negatywne): ocenione {b['kio_overturned']['evaluable']},"
+        f" w jednym klastrze {b['kio_overturned']['in_cluster']}"),
         f"- Powody: {json.dumps(pos['reasons'], ensure_ascii=False, sort_keys=True)}",
         "",
         "## Test C: fałszywe alarmy",
@@ -330,20 +330,20 @@ def markdown_summary(report: dict) -> str:
         lines.append("- Brak zakończonego przebiegu silnika.")
     else:
         lines += [
-            f"- Klastry w próbie: {c['sampled']} z {c['candidates']} ({c['scope']}),"
-            f" z sygnałem {c['with_signal']}",
-            f"- Od progu przeglądu: {_pct(c['share_review'])}, od progu publikacji:"
-            f" {_pct(c['share_publish'])}",
+            (f"- Klastry w próbie: {c['sampled']} z {c['candidates']} ({c['scope']}),"
+            f" z sygnałem {c['with_signal']}"),
+            (f"- Od progu przeglądu: {_pct(c['share_review'])}, od progu publikacji:"
+            f" {_pct(c['share_publish'])}"),
         ]
     lines += [
         "",
         "## Proponowane parametry",
         "",
         f"- review_threshold: {p['review_threshold']} (obecnie {p['current']['review_threshold']})",
-        f"- publish_threshold: {p['publish_threshold']}"
-        f" (obecnie {p['current']['publish_threshold']})",
-        f"- podstawa: {p['basis']}, klastrów kontrolnych {cal['control_n']},"
-        f" trafień B {cal['positives_n']}",
+        (f"- publish_threshold: {p['publish_threshold']}"
+        f" (obecnie {p['current']['publish_threshold']})"),
+        (f"- podstawa: {p['basis']}, klastrów kontrolnych {cal['control_n']},"
+        f" trafień B {cal['positives_n']}"),
         "",
         "## Sprawy",
         "",
