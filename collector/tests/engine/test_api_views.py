@@ -365,6 +365,27 @@ def test_stats_and_oecd_catalog(db, world):
     assert {r["status"] for r in catalog} == {"A", "C", "N"}
 
 
+def test_signal_of_older_run_is_hidden_after_newer_done_run(db, world):
+    # Przebieg w toku nie ukrywa sygnałów ostatniego zakończonego przebiegu.
+    db.execute("insert into engine_runs(as_of, status) values (%s, 'running')",
+               (world["as_of"],))
+    db.commit()
+    assert [r["signal_id"] for r in _rows(db, "signals")] == [CLUSTER_ID]
+    assert _rows(db, "stats")[0]["signals_published"] == 1
+
+    # Nowszy zakończony przebieg bez tego klastra: sygnał zostaje w tabeli, znika z API.
+    db.execute("update engine_runs set status = 'done', finished_at = now()"
+               " where status = 'running'")
+    db.commit()
+    assert db.execute("select status from signals where signal_id = %s",
+                      (CLUSTER_ID,)).fetchone()["status"] == "published"
+    assert _rows(db, "signals") == []
+    assert _rows(db, "signal_detail") == []
+    assert _rows(db, "stats")[0]["signals_published"] == 0
+    assert all(r["signal_ids"] == [] for r in _rows(db, "bidders"))
+    assert all(r["signal_ids"] == [] for r in _rows(db, "buyers"))
+
+
 def test_mask_text_is_literal_and_case_insensitive(db):
     got = db.execute(
         "select tie_mask_text(%s, %s, %s) t",
