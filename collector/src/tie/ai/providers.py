@@ -28,6 +28,15 @@ class BudgetExceeded(Exception):
     pass
 
 
+class ProviderHttpError(RuntimeError):
+    """The provider answered with an HTTP error status (4xx/5xx that was not retried)."""
+
+    def __init__(self, provider: str, status: int, message: str):
+        super().__init__(message)
+        self.provider = provider
+        self.status = status
+
+
 def cost_usd(provider: str, model: str, input_tokens: int, output_tokens: int) -> float:
     price = PRICES.get((provider, model))
     if price is None:
@@ -87,7 +96,8 @@ def _post(client: PoliteClient, budget: Budget, *, provider: str, model: str, ta
     if r.status_code >= 400:
         budget.record(provider=provider, model=model, task=task, input_tokens=0,
                       output_tokens=0, latency_ms=latency_ms, ok=False)
-        raise RuntimeError(f"{provider} request failed: HTTP {r.status_code}: {r.text[:500]}")
+        raise ProviderHttpError(provider, r.status_code,
+                                f"{provider} request failed: HTTP {r.status_code}: {r.text[:500]}")
     try:
         data = r.json()
     except ValueError:

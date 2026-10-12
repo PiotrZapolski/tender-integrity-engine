@@ -81,7 +81,15 @@ on conflict (kind, key) do nothing;
 
 The same works for `needs_review` documents. Bids that fail during identity matching are
 logged (`identity: bid <id> skipped`) and retried by the next `identity` job; they never
-block the other bids.
+block the other bids. Each failed run increments `bids.identity_failures`; after 3 failed
+runs the bid is excluded from matching (`bids_identity_excluded` in `tie stats`). A rejected
+Jev key (HTTP 401/403), the AI budget, a network outage, or a batch in which every new bid
+failed stops the job without counting anything. After fixing the cause (for example a Jev
+API change), give the excluded bids another chance:
+
+```sql
+update bids set identity_failures = 0 where bidder_id is null;
+```
 
 ## Backup
 

@@ -11,10 +11,17 @@ o nazwie zastępczej `NIP <nip>` (`placeholder_name`); biała lista podmienia j�
 
 Każda oferta to osobna transakcja (decider sam zatwierdza wiersz w `ai_calls`). Błąd jednej
 oferty (np. odrzucony stan w Jev) nie zatrzymuje pozostałych: oferta jest logowana, pomijana
-i dopisywana do zbioru `skip`, więc w tym samym przebiegu nie wraca; kolejny przebieg (następne
-zadanie `identity`) spróbuje jej znowu. Przerywają tylko błędy systemowe: `BudgetExceeded`,
-utrata połączenia z bazą i wyczerpane ponowienia HTTP (`HttpGiveUp`), a także sytuacja, gdy
-w paczce co najmniej dwóch ofert nie udała się żadna.
+i dopisywana do zbioru `skip`, więc w tym samym przebiegu nie wraca. Na końcu paczki ofertom,
+które się nie udały, zwiększamy `bids.identity_failures`; kolejny przebieg (następne zadanie
+`identity`) spróbuje ich znowu, ale po `MAX_IDENTITY_FAILURES` nieudanych przebiegach oferta
+wypada z dopasowania (reset licznika: docs/OPERATIONS.md). Nowe oferty (licznik 0) idą
+pierwsze, więc trwale błędne oferty nie zasłaniają reszty.
+
+Przerywają (bez zwiększania liczników) tylko błędy systemowe: `BudgetExceeded`, utrata
+połączenia z bazą, wyczerpane ponowienia HTTP (`HttpGiveUp`), odrzucony klucz (HTTP 401/403),
+a także sytuacja, gdy w paczce były co najmniej dwie nowe oferty i żadna z nich się nie udała
+(awaria nie może oznaczyć dobrych ofert jako błędnych). Paczka samych ofert, które już
+wcześniej się nie udały, tylko zwiększa liczniki i nie przerywa.
 """
 
 from __future__ import annotations
@@ -25,13 +32,19 @@ from typing import Any, Protocol
 
 import psycopg
 
-from tie.ai.providers import BudgetExceeded
+from tie.ai.providers import BudgetExceeded, ProviderHttpError
 from tie.bzp.store import upsert_bidder
 from tie.http import HttpGiveUp
 from tie.identity.names import normalize_name, placeholder_name
 
 log = logging.getLogger(__name__)
 
+# A bid that failed in this many separate identity runs is no longer selected.
+MAX_IDENTITY_FAILURES = 3
+# Filter shared by candidate selection here and the remaining-bids count in tie.handlers.
+UNMATCHED_SQL = f"bidder_id is null and identity_failures < {MAX_IDENTITY_FAILURES}"
+# Rejected API key: every bid would fail the same way.
+AUTH_STATUSES = frozenset({401, 403})
 MIN_SIMILARITY = 0.45
 NONE_CHOICE = "none"
 MATCH_INSTRUCTIONS = (
@@ -120,8 +133,10 @@ def _resolve_by_nip(conn: psycopg.Connection, raw_name: str, nip: str) -> tuple[
 
 
 def _systemic(exc: BaseException) -> bool:
-    """Błąd, który dotyczy wszystkich ofert (budżet, baza, sieć), a nie jednej oferty."""
+    """Błąd, który dotyczy wszystkich ofert (budżet, baza, sieć, klucz), a nie jednej oferty."""
     fatal = (BudgetExceeded, psycopg.OperationalError, psycopg.InterfaceError, HttpGiveUp)
+    if isinstance(exc, ProviderHttpError) and exc.status in AUTH_STATUSES:
+        return True
     return isinstance(exc, fatal) or isinstance(exc.__cause__, HttpGiveUp)
 
 
@@ -133,18 +148,21 @@ def resolve_unmatched_bids(
 
     Zwraca liczbę ofert dopasowanych do istniejących wykonawców. Oferty z `skip` są pomijane;
     id ofert, których nie udało się przetworzyć, są do `skip` dopisywane (ten sam zbiór
-    przekazuj w kolejnych wywołaniach jednego przebiegu).
+    przekazuj w kolejnych wywołaniach jednego przebiegu), a ich `identity_failures` rośnie o 1
+    na końcu paczki.
     """
     if skip is None:
         skip = set()
     bids = conn.execute(
-        "select id, bidder_name_raw, bidder_nip_raw from bids"
-        " where bidder_id is null and not (id = any(%s::bigint[])) order by id limit %s",
+        "select id, bidder_name_raw, bidder_nip_raw, identity_failures from bids"
+        f" where {UNMATCHED_SQL} and not (id = any(%s::bigint[]))"
+        " order by identity_failures, id limit %s",
         (list(skip), limit),
     ).fetchall()
     conn.commit()
 
-    matched = failed = 0
+    matched = 0
+    failed: list[int] = []
     # Ta sama nazwa w kilku ofertach w jednym przebiegu: jedna decyzja AI.
     seen: dict[str, tuple[int, float | None, bool]] = {}
     for bid in bids:
@@ -177,15 +195,23 @@ def resolve_unmatched_bids(
             conn.rollback()
             if _systemic(exc):
                 raise
-            failed += 1
+            failed.append(bid["id"])
             skip.add(bid["id"])
             log.exception("identity: bid %s skipped", bid["id"])
             continue
         if existed:
             matched += 1
     log.info("identity: %d bids processed, %d matched to existing bidders, %d skipped",
-             len(bids), matched, failed)
-    if len(bids) >= 2 and failed == len(bids):
-        # Every bid failing points at a systemic problem (API contract, key), not at data.
-        raise RuntimeError(f"identity: all {len(bids)} bids failed")
+             len(bids), matched, len(failed))
+    fresh = [b["id"] for b in bids if b["identity_failures"] == 0]
+    if len(fresh) >= 2 and set(fresh) <= set(failed):
+        # Every fresh bid failing points at a systemic problem (API contract, key), not at
+        # data; counters stay untouched so an outage does not mark good bids as poison.
+        raise RuntimeError(f"identity: all {len(fresh)} bids failed"
+                           f" ({len(bids)} bids in batch)")
+    if failed:
+        conn.execute(
+            "update bids set identity_failures = identity_failures + 1"
+            " where id = any(%s::bigint[])", (failed,))
+        conn.commit()
     return matched
