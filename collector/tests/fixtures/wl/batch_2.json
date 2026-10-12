@@ -1,0 +1,69 @@
+{
+  "result": {
+    "entries": [
+      {
+        "identifier": "6791021905",
+        "subjects": [
+          {
+            "name": "MULTISERVICE SPÓŁKA Z OGRANICZONĄ ODPOWIEDZIALNOŚCIĄ",
+            "nip": "6791021905",
+            "statusVat": "Czynny",
+            "regon": "350849112",
+            "pesel": null,
+            "krs": "0000047217",
+            "residenceAddress": null,
+            "workingAddress": "RYNEK 15-16, 44-100 GLIWICE",
+            "representatives": [],
+            "authorizedClerks": [],
+            "partners": [],
+            "registrationLegalDate": "2003-12-31",
+            "registrationDenialBasis": null,
+            "registrationDenialDate": null,
+            "restorationBasis": null,
+            "restorationDate": null,
+            "removalBasis": null,
+            "removalDate": null,
+            "exemptionSmeDate": null,
+            "accountNumbers": [
+              "63102015920000260202317626",
+              "70102039740000520202380293",
+              "76903800040009425620000010",
+              "91102039740000500202050698"
+            ],
+            "hasVirtualAccounts": false
+          }
+        ]
+      },
+      {
+        "identifier": "7010000005",
+        "subjects": [
+          {
+            "name": "JAN TESTOWY",
+            "nip": "7010000005",
+            "statusVat": "Czynny",
+            "regon": "000000000",
+            "pesel": null,
+            "krs": null,
+            "residenceAddress": "TESTOWA 1, 00-001 WARSZAWA",
+            "workingAddress": null,
+            "representatives": [],
+            "authorizedClerks": [],
+            "partners": [],
+            "registrationLegalDate": "2025-12-02",
+            "registrationDenialBasis": null,
+            "registrationDenialDate": null,
+            "restorationBasis": null,
+            "restorationDate": null,
+            "removalBasis": null,
+            "removalDate": null,
+            "exemptionSmeDate": null,
+            "accountNumbers": [],
+            "hasVirtualAccounts": false
+          }
+        ]
+      }
+    ],
+    "requestId": "test-batch",
+    "requestDateTime": "12-10-2026 12:00:00"
+  }
+}

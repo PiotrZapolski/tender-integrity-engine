@@ -59,7 +59,9 @@ kontrolna OECD liczona na całej Polsce.
 | e-Zamówienia, `GET /mp-readmodels/api/Search/GetTenderDocuments?tenderId={ocds}` | otwarte | lista dokumentów z nazwami, np. "INFORMACJA Z OTWARCIA OFERT.pdf" |
 | platformazakupowa.pl | strona publiczna, limit tempa (HTTP 429 przy pierwszym zapytaniu) | otwarcia ofert, do zbadania |
 | ezamawiajacy.pl, logintrade.net | do zbadania | otwarcia ofert |
-| API KRS (Ministerstwo Sprawiedliwości) | otwarte | zarząd, wspólnicy, adres, forma prawna |
+| API KRS (api-krs.ms.gov.pl) | otwarte | forma prawna, adres; dane osób MASKOWANE (np. "G*****"), więc nie nadaje się do łączenia firm przez osoby |
+| MSiG (wyszukiwarka-msig.ms.gov.pl/api) | otwarte, bez klucza | ogłoszenia o wpisach do KRS z niemaskowanymi nazwiskami i PESEL zarządów (część 1b; PESEL tylko jako HMAC) |
+| Biała lista VAT (wl-api.mf.gov.pl) | otwarte, 100 zapytań wyszukujących dziennie po 30 NIP | KRS, REGON, adres, rozpoznanie JDG, rachunki bankowe (wspólny rachunek lub adres oferentów = sygnał 3.2.11) |
 | CEIDG | darmowy token | rozpoznanie JDG |
 | decyzje UOKiK (uokik.gov.pl, decyzje.uokik.gov.pl) | publiczne PDF | zbiór wzorcowy; zawierają oferentów i ceny |
 | wyroki KIO (orzeczenia.uzp.gov.pl) | publiczne | zbiór wzorcowy 2021+ (art. 108 ust. 1 pkt 5 Pzp) |
@@ -374,8 +376,7 @@ oficjalnym cenniku. Lokalne LLM na głównym boxie odrzucone: brak GPU (GT 710),
 
 ## 12. Infrastruktura, deploy, testy
 
-- Monorepo: `collector/`, `engine/` (Python), `web/` (Next.js), `infra/` (Compose,
-  Caddy), `docs/`.
+- Dwa repozytoria. Backend: publiczne `tender-integrity-engine` (TIE; `collector/`, `engine/`, walidacja, `infra/`, `docs/`), do przekazania instytucjom do samodzielnej analizy. Frontend zmowy.pl: osobne repo (Next.js), tylko prezentacja, czyta z widoków tylko do odczytu w bazie TIE.
 - Deploy: GitHub Actions, self-hosted runner na głównym boxie, `/var/www/zmowy/`,
   `docker-compose.yml` + `docker-compose.prod.yml`, sieć `zoyeai_sail`, blok Caddy,
   checklista z `/root/SERVER.md` sekcja 7 (w tym weryfikacja backupu).
