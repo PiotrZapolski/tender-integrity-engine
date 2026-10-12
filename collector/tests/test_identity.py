@@ -255,6 +255,8 @@ def test_fresh_bids_come_first(db):
     jev = PoisonJev("0", 0.93)
     assert resolve_unmatched_bids(db, jev, limit=1, skip=set()) == 1
     assert jev.calls == [GOOD]
+    assert db.execute("select bidder_id from bids where id = %s", (fresh_id,)
+                      ).fetchone()["bidder_id"] is not None
 
 
 def http_error(status):
