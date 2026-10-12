@@ -1,7 +1,8 @@
 """Zapis ogłoszeń o wyniku z BZP do Postgresa (idempotentny upsert).
 
 `upsert_notice` zapisuje kupującego, postępowanie, części i zwycięzców w jednej transakcji,
-zatwierdza ją, a potem (gdy trzeba) dodaje zadanie pobrania dokumentów z e-Zamówień.
+zatwierdza ją, a potem (gdy trzeba) dodaje zadanie pobrania dokumentów z platformy
+postępowania (e-Zamówienia albo ezamawiajacy.pl).
 `upsert_bidder` nie zatwierdza transakcji: robi to wywołujący.
 """
 
@@ -12,6 +13,7 @@ import psycopg
 from tie.bzp.parser import LotResult, ResultNotice
 from tie.identity.names import looks_like_company, normalize_name
 from tie.jobs import enqueue
+from tie.platforms import ezamawiajacy
 
 DOCS_JOB = "ezam_docs"
 DOCS_PLATFORM = "ezamowienia"
@@ -192,17 +194,30 @@ def _upsert_lot(conn: psycopg.Connection, ocds_id: str, lot: LotResult) -> None:
     )
 
 
-def _needs_opening(notice: ResultNotice) -> bool:
-    return notice.platform == DOCS_PLATFORM and any(
-        lot.n_offers is not None and lot.n_offers >= 2 for lot in notice.lots
-    )
+def _docs_job(notice: ResultNotice) -> tuple[str, dict] | None:
+    """Zadanie pobrania dokumentów `(kind, payload)` albo None, gdy nie ma czego szukać.
+
+    Informacja z otwarcia ofert ma sens przy co najmniej 2 ofertach w którejś części.
+    e-Zamówienia: zawsze. ezamawiajacy.pl: tylko gdy pole 1.6 wskazuje stronę postępowania
+    (sam adres platformy zamawiającego nie wystarcza). Inne platformy: brak kolektora.
+    """
+    if not any(lot.n_offers is not None and lot.n_offers >= 2 for lot in notice.lots):
+        return None
+    if notice.platform == DOCS_PLATFORM:
+        return DOCS_JOB, {"ocds_id": notice.ocds_id}
+    if notice.platform == ezamawiajacy.PLATFORM:
+        url = ezamawiajacy.procedure_url(notice.platform_url)
+        if url:
+            return ezamawiajacy.DOCS_JOB, {"ocds_id": notice.ocds_id, "url": url}
+    return None
 
 
 def upsert_notice(conn: psycopg.Connection, notice: ResultNotice, raw_sha256: str) -> dict:
     """Zapisz ogłoszenie o wyniku; ponowny zapis nadpisuje wartości, nie dubluje wierszy.
 
     Zwraca `{"ocds_id": str, "lots": int, "needs_opening": bool}`. Gdy `needs_opening`,
-    po zatwierdzeniu transakcji dodaje zadanie `ezam_docs` z kluczem `ocds_id`.
+    po zatwierdzeniu transakcji dodaje zadanie pobrania dokumentów platformy (`ezam_docs`
+    albo `ezamawiajacy_docs`) z kluczem `ocds_id`.
 
     Ogłoszenie bez `tenderId` (puste lub brak) rzuca `ValueError` przed jakimkolwiek zapisem:
     inaczej wszystkie takie ogłoszenia nadpisywałyby jeden wiersz `procedures('')`. Handler
@@ -220,7 +235,8 @@ def upsert_notice(conn: psycopg.Connection, notice: ResultNotice, raw_sha256: st
         conn.rollback()
         raise
 
-    needs_opening = _needs_opening(notice)
-    if needs_opening:
-        enqueue(conn, DOCS_JOB, notice.ocds_id, {"ocds_id": notice.ocds_id})
-    return {"ocds_id": notice.ocds_id, "lots": len(notice.lots), "needs_opening": needs_opening}
+    job = _docs_job(notice)
+    if job is not None:
+        kind, payload = job
+        enqueue(conn, kind, notice.ocds_id, payload)
+    return {"ocds_id": notice.ocds_id, "lots": len(notice.lots), "needs_opening": job is not None}
