@@ -284,7 +284,7 @@ def test_sparse_pairs_do_not_fail_or_signal(db):
     run_id = _run(db, out["as_of"])
     mid = "cpv5_prov:45233:PL22"
     f = out["firms"]
-    db.executemany(
+    db.cursor().executemany(
         "insert into pairs(run_id, a, b, market_id, n_together, a_wins, b_wins, other_wins,"
         " shared_account, shared_address) values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
         [
