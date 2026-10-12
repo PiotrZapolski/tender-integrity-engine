@@ -87,7 +87,7 @@ def test_rotation_cartel_is_not_a_territorial_split(db):
 
 
 def test_rerun_replaces_results_of_the_same_run(db):
-    _, run_id, cid = _synth_run(db, "split")
+    _, run_id, _ = _synth_run(db, "split")
 
     first = compute_market_tests(db, run_id)
     second = compute_market_tests(db, run_id)
