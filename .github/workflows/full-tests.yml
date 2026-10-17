@@ -1,0 +1,66 @@
+name: full-tests
+
+# Pelny zestaw. Wolany z ci.yml (PR) i przez kolejke merge (ref = sha albo galaz).
+on:
+  workflow_call:
+    inputs:
+      ref:
+        description: 'Sha albo galaz do przetestowania (puste = domyslny ref zdarzenia).'
+        type: string
+        required: false
+        default: ''
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: 'Sha albo galaz do przetestowania (puste = domyslny ref).'
+        type: string
+        required: false
+        default: ''
+jobs:
+  collector:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: tie
+          POSTGRES_PASSWORD: tie
+          POSTGRES_DB: tie_test
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U tie" --health-interval 5s
+          --health-timeout 5s --health-retries 10
+    env:
+      TEST_DATABASE_URL: postgresql://tie:tie@localhost:5432/tie_test
+    defaults:
+      run:
+        working-directory: collector
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+      - run: sudo apt-get update && sudo apt-get install -y poppler-utils tesseract-ocr tesseract-ocr-pol tesseract-ocr-osd catdoc
+      - uses: astral-sh/setup-uv@v3
+        with:
+          enable-cache: true
+          cache-dependency-glob: collector/pyproject.toml
+      - run: uv venv && uv pip install -e ".[dev]"
+      - run: uv run ruff check src tests
+      - run: uv run pytest -q
+  image:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+      - run: docker build -t tie-collector collector
+      # Proves the SQL migration ships inside the non-editable wheel.
+      - run: >-
+          docker run --rm tie-collector python -c "from importlib import resources;
+          assert resources.files('tie.migrations').joinpath('001_init.sql').is_file();
+          import tie.config, tie.db, tie.jobs, tie.http"
+      - run: docker run --rm tie-collector tie --help
+      # Legacy .doc extraction and orientation detection of turned scans need these.
+      - run: >-
+          docker run --rm tie-collector sh -c
+          "command -v catdoc && tesseract --list-langs 2>&1 | grep -qx osd"
