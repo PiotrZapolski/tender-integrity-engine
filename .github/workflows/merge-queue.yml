@@ -1,0 +1,54 @@
+# Merge queue (second_brain#59). Copy to .github/workflows/merge-queue.yml in the repo;
+# instructions: second_brain infra/ci/README.md. Change only the `deploy` line (and
+# `runs-on` if the repo has 2+ self-hosted CI runners).
+name: merge-queue
+
+on:
+  pull_request:
+    types: [labeled]
+  workflow_dispatch:
+    inputs:
+      dry-run:
+        description: Everything except the merge to master and the dispatches
+        type: boolean
+        default: false
+
+# One run per repo, a new one waits (cancel false) and takes every labelled PR.
+# Other labels get their own group, so they never replace the waiting run.
+concurrency:
+  group: ${{ (github.event_name == 'workflow_dispatch' || github.event.label.name == 'queue') && 'merge-queue' || format('merge-queue-noop-{0}', github.run_id) }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+  actions: write
+  checks: read
+  statuses: read
+
+jobs:
+  prepare:
+    if: github.event_name == 'workflow_dispatch' || github.event.label.name == 'queue'
+    uses: PiotrZapolski/second_brain/.github/workflows/mq-prepare.yml@master
+
+  test:
+    needs: prepare
+    if: needs.prepare.outputs.count != '0'
+    uses: ./.github/workflows/full-tests.yml
+    with:
+      ref: ${{ needs.prepare.outputs.sha }}
+    secrets: inherit
+
+  finish:
+    needs: [prepare, test]
+    if: always() && needs.prepare.result == 'success' && needs.prepare.outputs.count != '0'
+    uses: PiotrZapolski/second_brain/.github/workflows/mq-finish.yml@master
+    with:
+      branch: ${{ needs.prepare.outputs.branch }}
+      prs: ${{ needs.prepare.outputs.prs }}
+      heads: ${{ needs.prepare.outputs.heads }}
+      commits: ${{ needs.prepare.outputs.commits }}
+      tests: ${{ needs.test.result }}
+      deploy: deploy.yml
+      dry-run: ${{ inputs.dry-run == true }}
